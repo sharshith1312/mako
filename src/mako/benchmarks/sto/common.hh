@@ -27,12 +27,12 @@ struct versioned_str_struct : public versioned_str {
   }
 
   versioned_str_struct* resizeIfNeeded(const value_type& potential_new_value) {
-    // TODO: this cast is only safe because we have no ivars or virtual methods
-    return (versioned_str_struct*)this->reserve(versioned_str::size_for(potential_new_value.length()));
+    // Safe cast: versioned_str_struct has no additional ivars or virtual methods beyond versioned_str
+    return static_cast<versioned_str_struct*>(this->reserve(versioned_str::size_for(potential_new_value.length())));
   }
   versioned_str_struct* resizeIfNeeded(const std::string& potential_new_value) {
-    // TODO: this cast is only safe because we have no ivars or virtual methods
-    return (versioned_str_struct*)this->reserve(versioned_str::size_for(potential_new_value.length()));
+    // Safe cast: versioned_str_struct has no additional ivars or virtual methods beyond versioned_str
+    return static_cast<versioned_str_struct*>(this->reserve(versioned_str::size_for(potential_new_value.length())));
   }
 
   template <typename StringType>
