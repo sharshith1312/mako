@@ -19,7 +19,7 @@ rpc_test/bin
 conf
 tmp_conf*.xml
 benchmark*.log
-log*
+*.log
 .idea
 *.o
 *.orig
@@ -54,3 +54,4 @@ nfs_sync_*
 out-perf.masstree/*
 .cache/*
 cmake-build/*
+SILO_STO_REFACTORING_ANALYSIS.md
