@@ -1,44 +1,62 @@
-//
-// Created by weihshen on 3/29/21.
-//
+/**
+ * @file common.h
+ * @brief Common utilities and synchronization classes for Mako benchmarks
+ * @author weihshen
+ * @date 3/29/21
+ */
 
-#ifndef SILO_STO_COMMON_H
-#define SILO_STO_COMMON_H
+#ifndef MAKO_BENCHMARKS_COMMON_H
+#define MAKO_BENCHMARKS_COMMON_H
+
 #include <iostream>
+#include <fstream>
+#include <thread>
+#include <map>
+#include <string>
+#include <unordered_map>
 #include <arpa/inet.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <unordered_map>
-#include <iostream>
-#include <fstream>
-#include <thread>
-//#include "lib/memcached_client.h"
 
+// Constants
+namespace mako {
+    namespace constants {
+        constexpr int SYNC_POLL_DELAY_US = 0;  // Microseconds to sleep during polling
+    }
+}
+
+/**
+ * @brief Simple wrapper around std::map for string-to-int properties
+ */
 class HashWrapper {
-    public:
-    
+public:
     std::map<std::string, int> data;
     
-    void set_tprops(std::string k, int v) {
+    void set_tprops(const std::string& k, int v) {
         data[k] = v;
     }
 
-    int get_tprops(std::string k) {
-        if (data.find(k) != data.end()) {
-            return data[k];
+    int get_tprops(const std::string& k) const {
+        auto it = data.find(k);
+        if (it != data.end()) {
+            return it->second;
         } else {
             return -1;
         }
     }
-} ;
+};
 
-// in this implementation, we rely on nfs to sync file
-// running on the shard-0 on the leader datacenter
+/**
+ * @brief NFS-based synchronization utility
+ * 
+ * This implementation relies on NFS to sync files across nodes.
+ * Typically runs on shard-0 in the leader datacenter.
+ */
 namespace mako {
     class NFSSync {
-public:
-        static int set_key(std::string kk, const char *value, const char*host, int port) {
+    public:
+        static int set_key(const std::string& kk, const char* value, const char* host, int port) {
             std::string filename = std::string("nfs_sync_") + host + "_" + std::to_string(port) + "_" + kk;
             std::ofstream outfile(filename);
             if (!outfile) {
@@ -49,18 +67,18 @@ public:
             return 0;
         }
 
-        static void wait_for_key(std::string kk, const char*host, int port) {
+        static void wait_for_key(const std::string& kk, const char* host, int port) {
             std::string filename = std::string("nfs_sync_") + host + "_" + std::to_string(port) + "_" + kk;
-            while (1) {
+            while (true) {
                 std::ifstream infile(filename);
                 if (infile) {
                     break;
                 }
-                usleep(0);
+                usleep(constants::SYNC_POLL_DELAY_US);
             }
         }
 
-        static string get_key(std::string kk, const char*host, int port) {
+        static std::string get_key(const std::string& kk, const char* host, int port) {
             std::string filename = std::string("nfs_sync_") + host + "_" + std::to_string(port) + "_" + kk;
             std::ifstream infile(filename);
             return std::string((std::istreambuf_iterator<char>(infile)),
@@ -70,40 +88,4 @@ public:
 }
 
 
-/*
-namespace mako {
-    class Memcached
-    {
-    public:
-        static int set_key(std::string kk, const char *value, const char*host, int port) {
-            MemCachedClient *mc2 = new MemCachedClient(host, port);
-            int r = mc2->Insert(kk.c_str(), value);
-            delete mc2;
-            if (r!=0) { std::cout << "memClient can't insert a key:" << host << ", port:" << port << std::endl; }
-            return r;
-        }
-
-        static void wait_for_key(std::string kk, const char*host, int port) {
-            MemCachedClient *mc2 = new MemCachedClient(host, port);
-            Warning("wait a key:%s from host:%s, port:%d", kk.c_str(), host, port);
-            while (1) {
-                if (mc2->Get(kk.c_str()).compare("") == 0) {
-                    usleep(0);
-                } else {
-                    break;
-                }
-            }
-            delete mc2;
-        }
-
-        static string get_key(std::string kk, const char*host, int port) {
-            MemCachedClient *mc2 = new MemCachedClient(host, port);
-            std::string v = mc2->Get(kk.c_str());
-            delete mc2;
-            return v;
-        }
-    };
-}
-*/
-
-#endif //SILO_STO_COMMON_H
+#endif // MAKO_BENCHMARKS_COMMON_H
