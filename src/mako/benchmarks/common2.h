@@ -1,101 +1,150 @@
-//
-// Created by weihshen on 3/29/21.
-//
+/**
+ * @file common2.h
+ * @brief Additional common utilities for Mako benchmarks (dbtest specific)
+ * @author weihshen
+ * @date 3/29/21
+ * 
+ * This file contains utilities specifically for dbtest and TPC-C benchmarks.
+ */
 
-// ONLY for dbtest
-#ifndef SILO_STO_COMMON_2_H
-#define SILO_STO_COMMON_2_H
+#ifndef MAKO_BENCHMARKS_COMMON2_H
+#define MAKO_BENCHMARKS_COMMON2_H
+
 #include "sto/ThreadPool.h"
+#include "bench.h"
+#include "benchmarks/sto/ReplayDB.h"
+#include "benchmarks/sto/sync_util.hh"
+
 #include <unistd.h>
 #include <unordered_map>
 #include <thread>
 #include <vector>
-#include "bench.h"
-#include "benchmarks/sto/ReplayDB.h"
-#include "benchmarks/sto/sync_util.hh"
 #include <mutex>
+#include <sstream>
+#include <iterator>
+#include <string>
+#include <cstring>
 
-using namespace std;
-
-static vector<string>
-split_ws(const string &s)
-{
-    vector<string> r;
-    istringstream iss(s);
-    copy(istream_iterator<string>(iss),
-         istream_iterator<string>(),
-         back_inserter<vector<string>>(r));
-    return r;
+// Constants
+namespace mako {
+    namespace constants {
+        constexpr int NOOPS_COMMAND_LENGTH = 8;
+        constexpr char NOOPS_PREFIX[] = "no-ops:";
+        constexpr int NOOPS_PREFIX_LENGTH = 7;
+    }
 }
 
-// no-ops with epoch number, the pattern is "no-ops:4" with the new epoch number 4
-// return: epoch number
-int isNoops(const char *log, int len) {
-    if (len==8) {
-        if (log[0] == 'n' && log[1] == 'o' && log[2] == '-' &&
-            log[3] == 'o' && log[4] == 'p' && log[5] == 's' && log[6] == ':') {
-                return log[7]-'0';
-            }
-    }
+/**
+ * @brief Split a string by whitespace
+ * @param s Input string to split
+ * @return Vector of whitespace-separated tokens
+ */
+static std::vector<std::string> split_ws(const std::string& s) {
+    std::vector<std::string> result;
+    std::istringstream iss(s);
+    std::copy(std::istream_iterator<std::string>(iss),
+              std::istream_iterator<std::string>(),
+              std::back_inserter(result));
+    return result;
+}
 
+/**
+ * @brief Check if log entry is a no-ops command with epoch number
+ * @param log Log entry to check
+ * @param len Length of log entry
+ * @return Epoch number if it's a no-ops command (pattern: "no-ops:4"), -1 otherwise
+ */
+int isNoops(const char* log, int len) {
+    if (len == mako::constants::NOOPS_COMMAND_LENGTH) {
+        if (std::strncmp(log, mako::constants::NOOPS_PREFIX, mako::constants::NOOPS_PREFIX_LENGTH) == 0) {
+            return log[mako::constants::NOOPS_PREFIX_LENGTH] - '0';
+        }
+    }
     return -1;
 }
 
-bench_runner * start_workers_tpcc(int leader_config, /*leader or learner (new leader)*/
-                        abstract_db *db,
-                        int threads_nums,
-                        bool skip_load = false /* for failover */,
-                        int run = 0, /* for run() and rest, 0: threads start; 1: start run */
-                        bench_runner *rc = NULL)
-{
-    std::string bench_type = "tpcc";
-    std::string bench_opts = "--f_mode=0";
-    if (skip_load) {
-        bench_opts = "--f_mode=1";
-    }
+/**
+ * @brief Start TPC-C worker threads
+ * @param leader_config Configuration for leader or learner (new leader)
+ * @param db Database instance
+ * @param threads_nums Number of threads
+ * @param skip_load Skip loading phase (for failover)
+ * @param run Run mode: 0 = threads start, 1 = start run
+ * @param rc Existing bench_runner to reuse
+ * @return Pointer to bench_runner instance
+ */
+bench_runner* start_workers_tpcc(int leader_config,
+                                 abstract_db* db,
+                                 int threads_nums,
+                                 bool skip_load = false,
+                                 int run = 0,
+                                 bench_runner* rc = nullptr) {
+    const std::string bench_type = "tpcc";
+    const std::string bench_opts = skip_load ? "--f_mode=1" : "--f_mode=0";
 
-    vector<string> bench_toks = split_ws(bench_opts);
-    int argc_bench = 1 + bench_toks.size();
-    char *argv_bench[argc_bench];
-    argv_bench[0] = (char *)bench_type.c_str();
-    for (size_t i = 1; i <= bench_toks.size(); i++)
-    {
-        argv_bench[i] = (char *)bench_toks[i - 1].c_str();
+    std::vector<std::string> bench_toks = split_ws(bench_opts);
+    int argc_bench = 1 + static_cast<int>(bench_toks.size());
+    
+    // Use vector instead of C-style array
+    std::vector<char*> argv_bench;
+    argv_bench.reserve(argc_bench);
+    argv_bench.push_back(const_cast<char*>(bench_type.c_str()));
+    
+    for (const auto& token : bench_toks) {
+        argv_bench.push_back(const_cast<char*>(token.c_str()));
     }
-    bench_runner *R = tpcc_do_test(db, argc_bench, argv_bench, run, rc);
-    return R;
+    
+    bench_runner* result = tpcc_do_test(db, argc_bench, argv_bench.data(), run, rc);
+    return result;
 }
 
-void modeMonitorRun(abstract_db *db, int thread_nums, bench_runner * R) {
+/**
+ * @brief Monitor mode run implementation
+ * @param db Database instance
+ * @param thread_nums Number of threads
+ * @param R Bench runner instance
+ */
+void modeMonitorRun(abstract_db* db, int thread_nums, bench_runner* R) {
     // Wait until mainPaxos sends data
-    std::unique_lock<std::mutex> lk((sync_util::sync_logger::m));
-    sync_util::sync_logger::cv.wait(lk, [] { return sync_util::sync_logger::toLeader; });
+    std::unique_lock<std::mutex> lk(sync_util::sync_logger::m);
+    sync_util::sync_logger::cv.wait(lk, [] { 
+        return sync_util::sync_logger::toLeader; 
+    });
 
-    Warning("start for modeMonitorRun, running:%d",sync_util::sync_logger::worker_running);   
+    Warning("start for modeMonitorRun, running:%d", sync_util::sync_logger::worker_running);   
     if (!sync_util::sync_logger::worker_running) {
         return;
     }
-    //bench_runner * r = start_workers_tpcc(1 /*leader_config*/, db, thread_nums, true);
-    start_workers_tpcc(1 /*leader_config*/, db, thread_nums, true, 1, R);
+    
+    // Start TPC-C workers in leader configuration with skip_load=true, run=1
+    start_workers_tpcc(1, db, thread_nums, true, 1, R);
     
     if (BenchmarkConfig::getInstance().getIsReplicated()) {
         Warning("######--------------###### send endLlogs #####---------------######");
-        std::string endLogInd = "";
-        for (int i = 0; i < BenchmarkConfig::getInstance().getNthreads(); i++)
-            add_log_to_nc((char *)endLogInd.c_str(), 0, i);
+        const std::string endLogInd = "";
+        for (int i = 0; i < BenchmarkConfig::getInstance().getNthreads(); i++) {
+            add_log_to_nc(const_cast<char*>(endLogInd.c_str()), 0, i);
+        }
     }
 
     lk.unlock();
     sync_util::sync_logger::cv.notify_one();
 }
 
-void modeMonitor(abstract_db *db, int thread_nums, bench_runner *R) {
-    Warning("start for modeMonitor, running:%d",sync_util::sync_logger::worker_running);
-    thread mimic_thread(&modeMonitorRun, db, thread_nums, R);
+/**
+ * @brief Start monitor mode in a separate thread
+ * @param db Database instance
+ * @param thread_nums Number of threads
+ * @param R Bench runner instance
+ */
+void modeMonitor(abstract_db* db, int thread_nums, bench_runner* R) {
+    Warning("start for modeMonitor, running:%d", sync_util::sync_logger::worker_running);
+    std::thread mimic_thread(&modeMonitorRun, db, thread_nums, R);
     pthread_setname_np(mimic_thread.native_handle(), "modeMonitor");
-    mimic_thread.detach();  // thread detach
+    mimic_thread.detach();
 }
 
-abstract_db *ThreadDBWrapperMbta::replay_thread_wrapper_db = new mbta_wrapper; // include just once!
+// Global database wrapper instance (initialized once)
+abstract_db* ThreadDBWrapperMbta::replay_thread_wrapper_db = new mbta_wrapper;
 
-#endif // SILO_STO_COMMON_2_H
+#endif // MAKO_BENCHMARKS_COMMON2_H
