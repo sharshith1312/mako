@@ -1,5 +1,5 @@
-#ifndef _NDB_TXN_H_
-#define _NDB_TXN_H_
+#ifndef MAKO_SILO_TXN_H
+#define MAKO_SILO_TXN_H
 
 #include <malloc.h>
 #include <stdint.h>
@@ -43,10 +43,38 @@ template <template <typename> class Transaction, typename P>
 class transaction_unusable_exception {};
 class transaction_read_only_exception {};
 
-// XXX: hacky
+// Transaction flag constants
+namespace mako {
+namespace silo {
+namespace transaction_flags {
+  constexpr uint64_t LOW_LEVEL_SCAN = 0x1;
+  constexpr uint64_t READ_ONLY = 0x2;
+}
+
+// Write record flag constants  
+namespace write_record_flags {
+  constexpr uint32_t INSERT = 0x1;
+  constexpr uint32_t DO_WRITE = 0x1 << 1;
+}
+
+// Tuple write info flag constants
+namespace tuple_write_flags {
+  constexpr uint32_t LOCKED = 0x1;
+  constexpr uint32_t INSERT = 0x1 << 1;
+}
+} // namespace silo
+} // namespace mako
+
+// TODO: Remove this global function pointer - should be encapsulated in a proper interface
 extern std::string (*g_proto_version_str)(uint64_t v);
 
-// base class with very simple definitions- nothing too exciting yet
+/**
+ * @brief Base class for all transaction implementations
+ * 
+ * Provides common transaction state management, abort reasons, and basic
+ * transaction lifecycle operations. This is the foundation for both
+ * Silo's transaction protocols.
+ */
 class transaction_base {
   template <template <typename> class T, typename P>
     friend class base_txn_btree;
@@ -63,14 +91,14 @@ public:
   enum {
     // use the low-level scan protocol for checking scan consistency,
     // instead of keeping track of absent ranges
-    TXN_FLAG_LOW_LEVEL_SCAN = 0x1,
+    TXN_FLAG_LOW_LEVEL_SCAN = mako::silo::transaction_flags::LOW_LEVEL_SCAN,
 
     // true to mark a read-only transaction- if a txn marked read-only
     // does a write, a transaction_read_only_exception is thrown and the
     // txn is aborted
-    TXN_FLAG_READ_ONLY = 0x2,
+    TXN_FLAG_READ_ONLY = mako::silo::transaction_flags::READ_ONLY,
 
-    // XXX: more flags in the future, things like consistency levels
+    // TODO: Add more flags for consistency levels and other features
   };
 
 #define ABORT_REASONS(x) \
@@ -181,8 +209,8 @@ protected:
   // the write set is logically a mapping from (tuple -> value_to_write).
   struct write_record_t {
     enum {
-      FLAGS_INSERT  = 0x1,
-      FLAGS_DOWRITE = 0x1 << 1,
+      FLAGS_INSERT  = mako::silo::write_record_flags::INSERT,
+      FLAGS_DOWRITE = mako::silo::write_record_flags::DO_WRITE,
     };
 
     constexpr inline write_record_t()
@@ -269,8 +297,8 @@ protected:
 
   struct dbtuple_write_info {
     enum {
-      FLAGS_LOCKED = 0x1,
-      FLAGS_INSERT = 0x1 << 1,
+      FLAGS_LOCKED = mako::silo::tuple_write_flags::LOCKED,
+      FLAGS_INSERT = mako::silo::tuple_write_flags::INSERT,
     };
     dbtuple_write_info() : tuple(), entry(nullptr), pos() {}
     dbtuple_write_info(dbtuple *tuple, write_record_t *entry,
@@ -844,4 +872,4 @@ struct txn_epoch_sync {
   static inline void reset_ntxn_persisted() {}
 };
 
-#endif /* _NDB_TXN_H_ */
+#endif // MAKO_SILO_TXN_H
