@@ -1,7 +1,7 @@
 #pragma once
 #include "config.h"
 #include "compiler.hh"
-// XXX: honestly hashtable should probably use local_vector too
+// TODO: Consider using local_vector for better performance and memory locality
 #include <vector>
 #include "Interface.hh"
 #include "Transaction.hh"
@@ -32,7 +32,11 @@ public:
 
     typedef V write_value_type;
 
+    // Hashtable constants
     static constexpr typename Version_type::type invalid_bit = TransactionTid::user_bit;
+    static constexpr unsigned DEFAULT_INIT_SIZE = 129;
+    static constexpr uintptr_t BUCKET_BIT_MASK = 1U << 0;
+    static constexpr int INITIAL_BUCKET_INDEX = -1;
 private:
   // our hashtable is an array of linked lists. 
   // an internal_elem is the node type for these linked lists
@@ -79,7 +83,7 @@ private:
 
   // used to mark whether a key is a bucket (for bucket version checks)
   // or a pointer (which will always have the lower 3 bits as 0)
-  static constexpr uintptr_t bucket_bit = 1U<<0;
+  static constexpr uintptr_t bucket_bit = BUCKET_BIT_MASK;
 
   static constexpr TransItem::flags_type insert_bit = TransItem::user0_bit;
   static constexpr TransItem::flags_type delete_bit = TransItem::user0_bit<<1;
@@ -199,11 +203,10 @@ private:
   // returns true if item already existed, false if it did not
   template <bool INSERT, bool SET, typename KT, typename VT>
   bool trans_write(const KT& k, const VT& v) {
-    // TODO: technically puts don't need to look into the table at all until lock time
+    // TODO: Optimize put operations - defer table lookup until lock time
     bucket_entry& buck = buck_entry(k);
-    // TODO: update doesn't need to lock the table
-    // also we should lock the head pointer instead so we don't
-    // mess with tids
+    // TODO: Optimize update operations - avoid locking entire table
+    // Consider locking head pointer instead to avoid TID interference
     lock(buck.version);
     internal_elem *e = find(buck, k);
     if (e) {
@@ -308,8 +311,9 @@ public:
     auto read_version = item.template read_value<Version_type>();
     // if item has insert_bit then its an insert so no validity check needed.
     // otherwise we check that it is both valid and not locked
-    // XXX bool validity_check = has_insert(item) || (el->valid() && (!is_locked(el->version) || item.has_lock(t)));
-    // XXX Why isn't it enough to just do the versionCheck?
+    // TODO: Investigate if additional validity check is needed beyond version check
+    // Current: validity_check = has_insert(item) || (el->valid() && (!is_locked(el->version) || item.has_lock(t)))
+    // Question: Is version check alone sufficient for correctness?
     return el->version.check_version(read_version);
   }
 
@@ -345,8 +349,8 @@ public:
     assert(is_locked(el));
     // delete
     if (item.flags() & delete_bit) {
-      // XXX: think we need an extra bit in here for opacity, or we should remove this now 
-      // rather than in cleanup
+      // TODO: Consider adding extra bit for opacity support or implement immediate removal
+      // Current approach defers removal until cleanup - evaluate if this is necessary
       el->version.set_version_locked(el->version.value() | invalid_bit);
       // we wait to remove the node til cleanup() (unclear that this is actually necessary)
       return;
@@ -502,7 +506,7 @@ public:
   const_iterator begin() const {
     const_iterator begin;
     begin.table = this;
-    begin.bucket = -1;
+    begin.bucket = INITIAL_BUCKET_INDEX;
     begin.node = NULL;
     return ++begin; //eh
   }
@@ -553,7 +557,7 @@ public:
       buck.head = cur->next;
     }
     unlock(buck.version);    
-    // TODO(nate): this would probably work fine as-is
+    // TODO: Enable RCU-based memory reclamation for better performance
     // Transaction::rcu_free(cur);
     return true;
   }
@@ -561,7 +565,7 @@ public:
   bool read(const Key& k, Value& retval) {
     auto e = find(buck_entry(k), k);
     if (e) {
-      // TODO(nate): this isn't safe for non-trivial types (need an atomic read)
+      // TODO: Implement atomic read for non-trivial types to ensure thread safety
       assign_val(retval, e->value.access());
     }
     return !!e;
@@ -623,7 +627,7 @@ public:
     lock(buck.version);
     internal_elem *e = find(buck, k);
     if (e) {
-      // XXX: kind of a stupid Set-only (still locks bucket)
+      // TODO: Optimize Set-only operations to avoid unnecessary bucket locking
       if (Set)
         set(e, val);
       exists = true;
@@ -646,7 +650,7 @@ public:
     internal_elem *e = find(buck, k);
     if (e) {
       assign_val(oldval, e->value.access());
-      // XXX: kind of a stupid Set-only (still locks bucket)
+      // TODO: Optimize Set-only operations to reduce bucket lock contention
       if (Set)
         set(e, val);
       exists = true;
@@ -666,8 +670,8 @@ public:
 
   void set(internal_elem *e, const Value& val) {
     assert(e);
-    // XXX: we probably don't need this lock since we have the bucket lock still
-    // (or we could do an optimistic set without the bucket lock)
+    // TODO: Remove redundant locking - bucket lock should be sufficient
+    // Alternative: Implement optimistic set without bucket lock
     lock(e->version);
     e->value.access() = val;
 #ifndef STO_NO_STM
@@ -682,7 +686,7 @@ public:
 
   bool nontrans_remove(const Key& k) { return remove(k); }
 
-  // XXX: there's a race between the read and the remove (oldval might be stale) but mehh
+  // TODO: Fix race condition between read and remove operations (oldval may be stale)
   bool nontrans_remove(const Key& k, Value& oldval) { if (read(k,oldval)) return remove(k); else return false; }
 
 private:
@@ -756,8 +760,8 @@ private:
     internal_elem *cur_head = buck.head;
     new_head->next = cur_head;
     buck.head = new_head;
-    // TODO(nate): this means we'll always have to do a hard opacity check on 
-    // the bucket version (but I don't think we can get a commit tid yet).
+    // TODO: Optimize opacity checking - currently requires hard check on bucket version
+    // Issue: Cannot obtain commit TID at this point in execution
     buck.version.inc_nonopaque_version();
   }
 
