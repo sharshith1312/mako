@@ -507,10 +507,10 @@ protected:
   // XXX: use parameterized typedef to avoid duplication
 
   // small types
-  typedef silo_small_vector<
+  typedef mako::silo::silo_small_vector<
     read_record_t,
     traits_type::read_set_expected_size> read_set_map_small;
-  typedef silo_small_vector<
+  typedef mako::silo::silo_small_vector<
     write_record_t,
     traits_type::write_set_expected_size> write_set_map_small;
   typedef small_unordered_map<
@@ -529,7 +529,7 @@ protected:
     traits_type::absent_set_expected_size> absent_set_map_static;
 
   // helper types for log writing
-  typedef silo_small_vector<
+  typedef mako::silo::silo_small_vector<
     uint32_t,
     traits_type::write_set_expected_size> write_set_u32_vec_small;
   typedef static_vector<

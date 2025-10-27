@@ -1,5 +1,5 @@
-#ifndef _SILO_SMALL_VECTOR_H_
-#define _SILO_SMALL_VECTOR_H_
+#ifndef MAKO_SILO_SMALL_VECTOR_H
+#define MAKO_SILO_SMALL_VECTOR_H
 
 #include <algorithm>
 #include <vector>
@@ -8,12 +8,25 @@
 #include "macros.h"
 #include "masstree/compiler.hh"
 
+namespace mako {
+namespace silo {
+
+// Default small buffer size for silo_small_vector (from macros.h SMALL_SIZE_VEC)
+constexpr size_t DEFAULT_SMALL_VECTOR_SIZE = 128;
+
 /**
- * References are not guaranteed to be stable across mutation
- *
- * XXX(stephentu): allow custom allocator
+ * @brief Small vector optimization container
+ * 
+ * A vector-like container that stores small numbers of elements inline
+ * to avoid heap allocation. When the number of elements exceeds SmallSize,
+ * it automatically switches to using std::vector for storage.
+ * 
+ * References are not guaranteed to be stable across mutation.
+ * 
+ * @tparam T Element type
+ * @tparam SmallSize Number of elements to store inline before switching to heap
  */
-template <typename T, size_t SmallSize = SMALL_SIZE_VEC>
+template <typename T, size_t SmallSize = DEFAULT_SMALL_VECTOR_SIZE>
 class silo_small_vector {
   typedef std::vector<T> large_vector_type;
 
@@ -30,21 +43,21 @@ public:
   typedef const T & const_reference;
   typedef size_t size_type;
 
-  silo_small_vector() : n(0), large_elems(0) {}
+  silo_small_vector() : small_size_(0), large_elems(0) {}
   ~silo_small_vector()
   {
     clearDestructive();
   }
 
   silo_small_vector(const silo_small_vector &that)
-    : n(0), large_elems(0)
+    : small_size_(0), large_elems(0)
   {
     assignFrom(that);
   }
 
   // not efficient, don't use in performance critical parts
   silo_small_vector(std::initializer_list<T> l)
-    : n(0), large_elems(nullptr)
+    : small_size_(0), large_elems(nullptr)
   {
     if (l.size() > SmallSize) {
       large_elems = new large_vector_type(l);
@@ -66,7 +79,7 @@ public:
   {
     if (unlikely(large_elems))
       return large_elems->size();
-    return n;
+    return small_size_;
   }
 
   inline bool
@@ -80,8 +93,8 @@ public:
   {
     if (unlikely(large_elems))
       return large_elems->front();
-    INVARIANT(n > 0);
-    INVARIANT(n <= SmallSize);
+    INVARIANT(small_size_ > 0);
+    INVARIANT(small_size_ <= SmallSize);
     return *ptr();
   }
 
@@ -96,9 +109,9 @@ public:
   {
     if (unlikely(large_elems))
       return large_elems->back();
-    INVARIANT(n > 0);
-    INVARIANT(n <= SmallSize);
-    return ptr()[n - 1];
+    INVARIANT(small_size_ > 0);
+    INVARIANT(small_size_ <= SmallSize);
+    return ptr()[small_size_ - 1];
   }
 
   inline const_reference
@@ -114,10 +127,10 @@ public:
       large_elems->pop_back();
       return;
     }
-    INVARIANT(n > 0);
+    INVARIANT(small_size_ > 0);
     if (!is_trivially_destructible)
-      ptr()[n - 1].~T();
-    n--;
+      ptr()[small_size_ - 1].~T();
+    small_size_--;
   }
 
   inline void
@@ -139,18 +152,18 @@ public:
   emplace_back(Args &&... args)
   {
     if (unlikely(large_elems)) {
-      INVARIANT(!n);
+      INVARIANT(!small_size_);
       large_elems->emplace_back(std::forward<Args>(args)...);
       return;
     }
-    if (unlikely(n == SmallSize)) {
-      large_elems = new large_vector_type(ptr(), ptr() + n);
+    if (unlikely(small_size_ == SmallSize)) {
+      large_elems = new large_vector_type(ptr(), ptr() + small_size_);
       large_elems->emplace_back(std::forward<Args>(args)...);
-      n = 0;
+      small_size_ = 0;
       return;
     }
-    INVARIANT(n < SmallSize);
-    new (&(ptr()[n++])) T(std::forward<Args>(args)...);
+    INVARIANT(small_size_ < SmallSize);
+    new (&(ptr()[small_size_++])) T(std::forward<Args>(args)...);
   }
 
   inline reference
@@ -171,14 +184,14 @@ public:
   clear()
   {
     if (unlikely(large_elems)) {
-      INVARIANT(!n);
+      INVARIANT(!small_size_);
       large_elems->clear();
       return;
     }
     if (!is_trivially_destructible)
-      for (size_t i = 0; i < n; i++)
+      for (size_t i = 0; i < small_size_; i++)
         ptr()[i].~T();
-    n = 0;
+    small_size_ = 0;
   }
 
   inline void
@@ -207,15 +220,15 @@ private:
   clearDestructive()
   {
     if (unlikely(large_elems)) {
-      INVARIANT(!n);
+      INVARIANT(!small_size_);
       delete large_elems;
-      large_elems = NULL;
+      large_elems = nullptr;
       return;
     }
     if (!is_trivially_destructible)
-      for (size_t i = 0; i < n; i++)
+      for (size_t i = 0; i < small_size_; i++)
         ptr()[i].~T();
-    n = 0;
+    small_size_ = 0;
   }
 
   template <typename ObjType>
@@ -533,14 +546,14 @@ private:
   small_end()
   {
     INVARIANT(!large_elems);
-    return small_iterator(ptr() + n);
+    return small_iterator(ptr() + small_size_);
   }
 
   inline const_small_iterator
   small_end() const
   {
     INVARIANT(!large_elems);
-    return const_small_iterator(ptr() + n);
+    return const_small_iterator(ptr() + small_size_);
   }
 
 public:
@@ -617,14 +630,14 @@ private:
     if (unlikely(that.large_elems)) {
       large_elems = new large_vector_type(*that.large_elems);
     } else {
-      INVARIANT(that.n <= SmallSize);
+      INVARIANT(that.small_size_ <= SmallSize);
       if (is_trivially_copyable) {
-        NDB_MEMCPY(ptr(), that.ptr(), that.n * sizeof(T));
+        NDB_MEMCPY(ptr(), that.ptr(), that.small_size_ * sizeof(T));
       } else {
-        for (size_t i = 0; i < that.n; i++)
+        for (size_t i = 0; i < that.small_size_; i++)
           new (&(ptr()[i])) T(that.ptr()[i]);
       }
-      n = that.n;
+      small_size_ = that.small_size_;
     }
   }
 
@@ -640,9 +653,12 @@ private:
     return reinterpret_cast<const T *>(&small_elems_buf[0]);
   }
 
-  size_t n;
+  size_t small_size_;
   char small_elems_buf[sizeof(T) * SmallSize];
   large_vector_type *large_elems;
 };
 
-#endif /* _SILO_SMALL_VECTOR_H_ */
+} // namespace silo
+} // namespace mako
+
+#endif // MAKO_SILO_SMALL_VECTOR_H

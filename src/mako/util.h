@@ -461,7 +461,7 @@ struct std_pair_first_cmp {
 template <typename T, size_t SmallSize = SMALL_SIZE_VEC>
 struct vec {
 #ifdef USE_SMALL_CONTAINER_OPT
-  typedef silo_small_vector<T, SmallSize> type;
+  typedef mako::silo::silo_small_vector<T, SmallSize> type;
 #else
   typedef std::vector<T> type;
 #endif
