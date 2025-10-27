@@ -1,6 +1,5 @@
-#ifndef _BENCHMARK_MBTA_WRAPPER_H_
-#define _BENCHMARK_MBTA_WRAPPER_H_
-#pragma once
+#ifndef MAKO_BENCHMARK_MBTA_WRAPPER_HH
+#define MAKO_BENCHMARK_MBTA_WRAPPER_HH
 #include <atomic>
 #include <cstdlib>
 #include "abstract_db.h"
@@ -19,6 +18,20 @@
 #include "lib/common.h"
 #include "benchmarks/rpc_setup.h"
 #include "mbta_sharded_ordered_index.hh"
+
+namespace mako {
+namespace mbta {
+namespace constants {
+    constexpr bool OPERATION_LOGGING_ENABLED = false;
+    constexpr size_t DEFAULT_HASHTABLE_SIZE_STRING = 999983;
+    constexpr size_t DEFAULT_HASHTABLE_SIZE_INT = 227497;
+    constexpr size_t DEFAULT_HASHTABLE_SIZE_CUSTOMER = 999983;
+    constexpr size_t DEFAULT_HASHTABLE_SIZE_HISTORY = 20000003;
+    constexpr size_t DEFAULT_HASHTABLE_SIZE_OORDER = 20000003;
+    constexpr size_t DEFAULT_HASHTABLE_SIZE_STOCK = 3000017;
+}
+}
+}
 
 // We have to do it on the coordinator instead of transaction.cc, because it only has a local copy of the readSet;
 #define GET_NODE_POINTER(val,len) reinterpret_cast<mako::Node *>((char*)(val+len-mako::BITS_OF_NODE));
@@ -75,13 +88,31 @@ std::atomic<long> ht_del(0);
 
 class mbta_wrapper;
 
-// PS: we don't use mbta_wraper_norm.hh anymore (in rolis, mbta_wraper_norm is the alias of mbta_wraper)
-class mbta_ordered_index : public abstract_ordered_index {    // weihshen, the mbta_ordered_index of Masstrans we need
+/**
+ * @brief Masstree-based transactional ordered index implementation
+ * 
+ * Provides a transactional ordered index using Masstree B-tree with STO
+ * transaction support. Integrates Silo's Masstree with STO transactions
+ * for high-performance key-value operations.
+ * 
+ * Note: mbta_wrapper_norm.hh is deprecated - this is now the unified implementation
+ */
+class mbta_ordered_index : public abstract_ordered_index {
 public:
+  /**
+   * @brief Deprecated constructor - use table_id version instead
+   */
   mbta_ordered_index(const std::string &name, mbta_wrapper *db, bool is_remote=false) : mbta(), db(db) {
     std::exit(EXIT_FAILURE);
   }
 
+  /**
+   * @brief Construct a new mbta ordered index
+   * @param name Table name
+   * @param table_id Unique table identifier
+   * @param db Parent database wrapper
+   * @param is_remote Whether this table is on a remote shard
+   */
   mbta_ordered_index(const std::string &name, const long table_id, mbta_wrapper *db, bool is_remote=false) : mbta(), db(db) {
       mbta.set_table_id(table_id);
       mbta.set_is_remote(is_remote);
@@ -90,16 +121,24 @@ public:
 
   std::string *arena(void);
 
+  /**
+   * @brief Transactional get operation
+   * @param txn Transaction context (unused)
+   * @param key Key to retrieve
+   * @param value Reference to store retrieved value
+   * @param max_bytes_read Maximum bytes to read
+   * @return true if key found, false otherwise
+   */
   bool get(void *txn, lcdf::Str key, std::string &value, size_t max_bytes_read) {
     if (!mbta.get_is_remote()) {
       STD_OP({
-        bool ret = mbta.transGet(key, value);
+        bool found = mbta.transGet(key, value);
         UPDATE_VS(value.data(),value.length())
-        return ret;
+        return found;
       });
     } else {
-      int ret=TThread::sclient->remoteGet(mbta.get_table_id(), key, value);
-      if (ret>0) {
+      int result = TThread::sclient->remoteGet(mbta.get_table_id(), key, value);
+      if (result > 0) {
         throw abstract_db::abstract_abort_exception();
       }
       UPDATE_VS(value.data(),value.length())
@@ -123,11 +162,17 @@ public:
 
   void set_table_name(const std::string& t) { mbta.set_table_name(t); }
 
-  // handle get request from a remote shard
+  /**
+   * @brief Handle get request from a remote shard
+   * @param key Key to retrieve
+   * @param value Reference to store retrieved value
+   * @param max_bytes_read Maximum bytes to read
+   * @return true if key found, false otherwise
+   */
   bool shard_get(lcdf::Str key, std::string &value, size_t max_bytes_read) {
     STD_OP({
-      bool ret = mbta.transGet(key, value);
-      return ret;
+      bool found = mbta.transGet(key, value);
+      return found;
     });
   }
 
@@ -921,26 +966,49 @@ private:
 */
 
 
+/**
+ * @brief Main database wrapper integrating Masstree B-tree with STO transactions
+ * 
+ * This class provides the primary database interface for the Mako system,
+ * combining Silo's Masstree B-tree storage engine with STO's transactional
+ * framework. It manages table creation, transaction lifecycle, and distributed
+ * operations across multiple shards.
+ * 
+ * Key features:
+ * - Pre-allocated table instances for performance
+ * - Distributed shard support with remote operations
+ * - Integration with STO transaction system
+ * - Support for TPC-C benchmark workloads
+ */
 class mbta_wrapper : public abstract_db {
 public:
-  // tables for a database instance; we can pre-allocate many tables; 
+  // Tables for a database instance; we can pre-allocate many tables
   // then do a mapping when user creates one in the code 
 
-  // table-id and index of this array is exactly same
-  std::vector<mbta_ordered_index *> global_table_instances ;
-  std::unordered_map<int, int> availableTable_id ;
+  // Table-id and index of this array are exactly the same
+  std::vector<mbta_ordered_index *> global_table_instances;
+  std::unordered_map<int, int> availableTable_id;
   // Track created tables by (name, shard_index) to avoid duplicates
   std::map<std::tuple<std::string,int>, int> tables_taken;
 
+  /**
+   * @brief Default constructor - initialization deferred to init()
+   */
   mbta_wrapper() { /* Avoid doing something here! */}
 
+  /**
+   * @brief Initialize the database wrapper
+   * 
+   * Pre-allocates table instances and sets up shard-specific table ID ranges.
+   * Each shard gets a contiguous range of table IDs to avoid conflicts.
+   */
   void init() {
-    preallocate_open_index() ;
+    preallocate_open_index();
 
-    auto& benchConfig = BenchmarkConfig::getInstance();
+    auto& bench_config = BenchmarkConfig::getInstance();
 
-    for (int i=0; i<benchConfig.getNshards(); i++) {
-      availableTable_id[i] = i * mako::NUM_TABLES_PER_SHARD + 1 ;
+    for (int shard_index = 0; shard_index < bench_config.getNshards(); shard_index++) {
+      availableTable_id[shard_index] = shard_index * mako::NUM_TABLES_PER_SHARD + 1;
     }
   }
 
@@ -971,14 +1039,18 @@ public:
     //txn_epoch_sync<Transaction>::finish();
   }
 
-  // for the helper thread, loader == true, source == 1
+  /**
+   * @brief Initialize thread-local state for database operations
+   * @param loader true for loader threads, false for worker threads
+   * @param source 1 for helper threads, other values for regular threads
+   */
   void
   thread_init(bool loader, int source)
   {
-    static int tidcounter = 0;
-    static int partition_id = 0; // to distinguish different worker thread
-    TThread::set_id(__sync_fetch_and_add(&tidcounter, 1));
-    TThread::set_mode(0); // checking in-progress
+    static int thread_id_counter = 0;
+    static int partition_id_counter = 0; // To distinguish different worker threads
+    TThread::set_id(__sync_fetch_and_add(&thread_id_counter, 1));
+    TThread::set_mode(0); // Enable checking in-progress transactions
     TThread::set_num_eprc_server(BenchmarkConfig::getInstance().getNumErpcServer());
     TThread::set_is_micro(BenchmarkConfig::getInstance().getIsMicro());
 #if defined(DISABLE_MULTI_VERSION)
@@ -1003,18 +1075,19 @@ public:
     TThread::isHomeWarehouse = true;
     TThread::isRemoteShard = false;
     TThread::skipBeforeRemotePayment = 0;
-    if(!loader) {
-      size_t old = __sync_fetch_and_add(&partition_id, 1);
-      TThread::set_pid (old);
+    
+    if (!loader) {
+      // Worker thread initialization
+      size_t partition_id = __sync_fetch_and_add(&partition_id_counter, 1);
+      TThread::set_pid(partition_id);
 
       TThread::sclient = new mako::ShardClient(BenchmarkConfig::getInstance().getConfig()->configFile,
                                                  BenchmarkConfig::getInstance().getCluster(),
                                                  BenchmarkConfig::getInstance().getShardIndex(),
-                                                 old);
-      //Notice("ParID[worker-id] pid:%d,id:%d,config:%s,loader:%d, ismultiversion:%d,helper_thread?:%d",TThread::getPartitionID(),TThread::id(),BenchmarkConfig::getInstance().getConfig()->configFile.c_str(),loader,TThread::is_multiversion(),source==1);
+                                                 partition_id);
     } else {
-      TThread::set_pid(TThread::id()%BenchmarkConfig::getInstance().getConfig()->warehouses);
-      //Notice("ParID[load-id] pid:%d,id:%d,config:%s,loader:%d, ismultiversion:%d,helper_thread?:%d",TThread::getPartitionID(),TThread::id(),BenchmarkConfig::getInstance().getConfig()->configFile.c_str(),loader,TThread::is_multiversion(),source==1);
+      // Loader thread initialization
+      TThread::set_pid(TThread::id() % BenchmarkConfig::getInstance().getConfig()->warehouses);
     }
     
     if (TThread::id() == 0) {
@@ -1221,4 +1294,4 @@ std::string *mbta_ordered_index::arena() {
   return (*db->thr_arena)();
 }
 
-#endif
+#endif /* MAKO_BENCHMARK_MBTA_WRAPPER_HH */
