@@ -21,6 +21,8 @@
 #include "benchmarks/sto/sync_util.hh"
 #include "benchmarks/benchmark_config.h"
 
+
+
 #ifndef STO_PROFILE_COUNTERS
 #define STO_PROFILE_COUNTERS 0
 #endif
@@ -78,7 +80,7 @@
 
 #include "config.h"
 
-#define MAX_THREADS 460 
+#define MAX_THREADS 460
 
 // weihshen, 4098*4098*3 should be enough, rather than 4098*4098*1024
 // 100w bytes
@@ -335,8 +337,9 @@ struct __attribute__((aligned(128))) threadinfo_t {
     using epoch_type = TRcuSet::epoch_type;
     epoch_type epoch;
     TRcuSet rcu_set;
-    // XXX(NH): these should be vectors so multiple data structures can register
-    // callbacks for these
+    // TODO: Refactor to use vectors for multiple callback registration
+    // Currently only supports single callback per event type
+    // Should be: std::vector<std::function<void(void)>> trans_start_callbacks;
     std::function<void(void)> trans_start_callback;
     std::function<void(void)> trans_end_callback;
     txp_counters p_;
@@ -1006,7 +1009,7 @@ public:
     }
 
     static TransactionTid::type initialized_tid() {
-        // XXX: we might want a nonopaque_bit in here too.
+        // TODO: Consider adding nonopaque_bit for better transaction ID management
         return TransactionTid::increment_value;
     }
 };
@@ -1219,10 +1222,9 @@ inline TransProxy& TransProxy::add_write(Args&&... args) {
         item().wdata_ = Packer<T>::pack(t()->buf_, std::forward<Args>(args)...);
         t()->any_writes_ = true;
     } else
-        // TODO: this assumes that a given writer data always has the same type.
-        // this is certainly true now but we probably shouldn't assume this in general
-        // (hopefully we'll have a system that can automatically call destructors and such
-        // which will make our lives much easier)
+        // TODO: Remove assumption that writer data always has the same type
+        // Current implementation assumes type consistency but this may not hold in general
+        // Future: Implement automatic destructor system for type-safe data management
         item().wdata_ = Packer<T>::repack(t()->buf_, item().wdata_, std::forward<Args>(args)...);
     return *this;
 }
