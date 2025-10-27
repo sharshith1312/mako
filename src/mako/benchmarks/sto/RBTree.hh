@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MAKO_STO_RBTREE_HH
+#define MAKO_STO_RBTREE_HH
 
 #include <cassert>
 #include <utility>
@@ -10,6 +11,17 @@
 #ifndef STO_NO_STM
 #include "Transaction.hh"
 #endif
+
+namespace mako {
+namespace sto {
+namespace constants {
+    constexpr bool RBTREE_DEBUG_ENABLED = false;
+    constexpr uintptr_t TREE_BIT = 1U << 0;
+    constexpr uintptr_t SIZE_BIT = 1U << 1;
+    constexpr uintptr_t START_BIT = 1U << 2;
+}
+}
+}
 
 #define DEBUG 0
 #if DEBUG
@@ -162,6 +174,17 @@ private:
 
 template <typename K, typename T, bool GlobalSize> class RBProxy;
 
+/**
+ * @brief Transactional red-black tree implementation for STO
+ * 
+ * A balanced binary search tree that supports transactional operations.
+ * Provides map-like semantics with ACID properties when used within
+ * STO transactions. Uses red-black tree balancing for O(log n) operations.
+ * 
+ * @tparam K Key type (must be comparable)
+ * @tparam T Value type
+ * @tparam GlobalSize Whether to maintain global size information
+ */
 template <typename K, typename T, bool GlobalSize>
 class RBTree 
 #ifndef STO_NO_STM
@@ -184,6 +207,9 @@ class RBTree
     typedef const RBTreeIterator<K, T, GlobalSize> const_iterator;
 
 public:
+    /**
+     * @brief Construct an empty red-black tree
+     */
     RBTree() {
         sizeversion_ = 0;
         size_ = 0;
@@ -200,13 +226,31 @@ public:
     typedef std::tuple<wrapper_type*, Version> node_info_type;
     typedef std::pair<node_info_type, node_info_type> boundaries_type;
 
-    // capacity 
+    /**
+     * @brief Get the number of elements in the tree
+     * @return Current size including transactional modifications
+     */
     inline size_t size() const;
-    // lookup
+    
+    /**
+     * @brief Count occurrences of a key (0 or 1 for trees)
+     * @param key Key to search for
+     * @return 1 if key exists, 0 otherwise
+     */
     inline size_t count(const K& key) const;
-    // element access
+    
+    /**
+     * @brief Access element with given key (insert if not present)
+     * @param key Key to access
+     * @return Proxy object for transactional access
+     */
     inline RBProxy<K, T, GlobalSize> operator[](const K& key);
-    // modifiers
+    
+    /**
+     * @brief Remove element with given key
+     * @param key Key to remove
+     * @return Number of elements removed (0 or 1)
+     */
     inline size_t erase(const K& key);
 
     // STAMP-compatible nontransactional methods
@@ -353,29 +397,46 @@ private:
     }
 */
 
-    // A (hard) phantom node is a node that's being inserted but not yet
-    // committed by another transaction. It should be treated as invisible
-    inline bool is_phantom_node(wrapper_type* node, Version val_ver) const {
+    /**
+     * @brief Check if node is a hard phantom (inserted by another uncommitted transaction)
+     * 
+     * A hard phantom node is being inserted but not yet committed by another 
+     * transaction. It should be treated as invisible to the current transaction.
+     * 
+     * @param node Node to check
+     * @param value_version Version of the node's value
+     * @return true if node is a hard phantom, false otherwise
+     */
+    inline bool is_phantom_node(wrapper_type* node, Version value_version) const {
         auto item = Sto::item(const_cast<RBTree<K, T, GlobalSize>*>(this), node);
-        return (is_inserted(val_ver) && !has_insert(item) && !has_delete(item));
+        return (is_inserted(value_version) && !has_insert(item) && !has_delete(item));
     }
 
-    // A soft phantom node is a node that's marked inserted by the current
-    // transaction. Its value information is visible (and only visible) to
-    // the current transaction
+    /**
+     * @brief Check if node is a soft phantom (inserted by current transaction)
+     * 
+     * A soft phantom node is marked as inserted by the current transaction.
+     * Its value information is visible only to the current transaction.
+     * 
+     * @param node Node to check
+     * @return true if node is a soft phantom, false otherwise
+     */
     inline bool is_soft_phantom(wrapper_type* node) const {
-        Version& val_ver = node->version();
+        Version& value_version = node->version();
         auto item = Sto::item(const_cast<RBTree<K, T, GlobalSize>*>(this), node);
-        return (is_inserted(val_ver) && (has_insert(item) || has_delete(item)));
+        return (is_inserted(value_version) && (has_insert(item) || has_delete(item)));
     }
 
-    // increment or decrement the offset size of the transaction's tree
+    /**
+     * @brief Increment or decrement the transactional size offset
+     * @param delta Change in size (+1 for insert, -1 for delete)
+     */
     inline void change_size_offset(ssize_t delta) {
         if (!GlobalSize)
             return;
         auto size_item = Sto::item(this, size_key_);
-        ssize_t prev_offset = size_item.has_write() ? size_item.template write_value<ssize_t>() : 0;
-        size_item.add_write(prev_offset + delta);
+        ssize_t previous_offset = size_item.has_write() ? size_item.template write_value<ssize_t>() : 0;
+        size_item.add_write(previous_offset + delta);
         assert(size_ + size_item.template write_value<ssize_t>() >= 0);
 #if DEBUG
         TransactionTid::lock(::lock);
@@ -385,32 +446,37 @@ private:
 #endif 
     }
 
-    // *Read-only* lookup operation
-    // Find and return a pointer to the rbwrapper. Abort if value inserted and not yet committed (by another txn).
-    // return values: (node*, version, found, boundary), boundary only valid if !found
-    // XXX node can point to the *found* node or its immediate parent or nothing (in case of empty tree)
-    // version can be the node's value version or treeversion_ (in case of empty tree)
-    // NOTE: this function must be surrounded by a lock in order to ensure we add the correct nodeversions
+    /**
+     * @brief Read-only lookup operation with phantom detection
+     * 
+     * Find and return a pointer to the rbwrapper. Abort if value is inserted 
+     * but not yet committed by another transaction.
+     * 
+     * @param search_pair Key-value pair to search for
+     * @return Tuple of (node*, version, found, boundary)
+     * 
+     * @note This function must be surrounded by a lock to ensure correct nodeversions
+     */
     inline std::tuple<wrapper_type*, Version, bool, boundaries_type>
-    find_or_abort(rbwrapper<rbpair<K, T>>& rbkvp) const {
-        auto results = verified_lookup(rbkvp);
+    find_or_abort(rbwrapper<rbpair<K, T>>& search_pair) const {
+        auto results = verified_lookup(search_pair);
 
-        // extract information from results
-        wrapper_type* x = std::get<0>(results);
-        Version val_ver = std::get<1>(results);
+        // Extract information from results
+        wrapper_type* found_node = std::get<0>(results);
+        Version value_version = std::get<1>(results);
         bool found = std::get<2>(results);
         boundaries_type& boundaries = std::get<3>(results);
 
         // PRESENT GET
         if (found) {
-            auto item = Sto::item(const_cast<RBTree<K, T, GlobalSize>*>(this), x);
-            // check if item is inserted by not committed yet 
-            if (is_inserted(val_ver)) {
-                // check if item was inserted by this transaction
+            auto item = Sto::item(const_cast<RBTree<K, T, GlobalSize>*>(this), found_node);
+            // Check if item is inserted but not yet committed
+            if (is_inserted(value_version)) {
+                // Check if item was inserted by this transaction
                 if (has_insert(item) || (has_delete(item))) {
                     return results;
                 } else {
-                    // some other transaction inserted this node and hasn't committed
+                    // Another transaction inserted this node and hasn't committed
 #if DEBUG
                     TransactionTid::lock(::lock);
                     printf("Aborted in find_or_abort\n");
@@ -421,33 +487,34 @@ private:
                     return results;
                 }
             }
-            // add a read of the value version for a present get
-            item.observe(val_ver);
+            // Add a read of the value version for a present get
+            item.observe(value_version);
         
         // ABSENT GET
         } else {
-            // add a read of treeversion if empty tree
-            if (!x) {
-                Sto::item(const_cast<RBTree<K, T, GlobalSize>*>(this), tree_key_).observe(val_ver);
+            // Add a read of treeversion if empty tree
+            if (!found_node) {
+                Sto::item(const_cast<RBTree<K, T, GlobalSize>*>(this), tree_key_).observe(value_version);
             }
 
-            // add reads of boundary nodes, marking them as nodeversion ptrs
+            // Add reads of boundary nodes, marking them as nodeversion ptrs
             for (unsigned int i = 0; i < 2; ++i) {
-                node_info_type& binfo = (i == 0)? boundaries.first : boundaries.second;
-                wrapper_type* n = std::get<0>(binfo);
-                Version v = std::get<1>(binfo);
-                if (n) {
+                node_info_type& boundary_info = (i == 0) ? boundaries.first : boundaries.second;
+                wrapper_type* boundary_node = std::get<0>(boundary_info);
+                Version boundary_version = std::get<1>(boundary_info);
+                if (boundary_node) {
 #if DEBUG
                     TransactionTid::lock(::lock);
-                    printf("\t#Tracking boundary 0x%lx (k %d), nv 0x%lx\n", (unsigned long)n, n->key(), v);
+                    printf("\t#Tracking boundary 0x%lx (k %d), nv 0x%lx\n", 
+                           (unsigned long)boundary_node, boundary_node->key(), boundary_version);
                     TransactionTid::unlock(::lock);
 #endif
                     Sto::item(const_cast<RBTree<K, T, GlobalSize>*>(this),
-                                    (reinterpret_cast<uintptr_t>(n)|0x1)).observe(v);
+                                    (reinterpret_cast<uintptr_t>(boundary_node)|0x1)).observe(boundary_version);
                 }
             }
         }
-        // item was committed or DNE, so return results
+        // Item was committed or does not exist, so return results
         return results;
     }
 
@@ -626,13 +693,13 @@ private:
     // XXX: this isn't actually a rwlock anymore so we could just make it a
     // normal tid or something
     mutable RWVersion treelock_;
-    // used to mark whether a key is for the tree structure (for tree version checks)
+    // Used to mark whether a key is for the tree structure (for tree version checks)
     // or a pointer (which will always have the lower 3 bits as 0)
-    static constexpr uintptr_t tree_bit = 1U<<0;
+    static constexpr uintptr_t tree_bit = mako::sto::constants::TREE_BIT;
     static constexpr uintptr_t tree_key_ = tree_bit;
-    static constexpr uintptr_t size_bit = 1U<<1;
+    static constexpr uintptr_t size_bit = mako::sto::constants::SIZE_BIT;
     static constexpr uintptr_t size_key_ = size_bit;
-    static constexpr uintptr_t start_bit = 1U<<2;
+    static constexpr uintptr_t start_bit = mako::sto::constants::START_BIT;
     static constexpr uintptr_t start_key_ = start_bit;
 #if DEBUG
     mutable struct stats {
@@ -1259,3 +1326,5 @@ inline void RBTree<K, T, GlobalSize>::print_absent_reads() {
     std::cout << "size: " << debug_size() << std::endl;
 }
 #endif
+
+#endif /* MAKO_STO_RBTREE_HH */
