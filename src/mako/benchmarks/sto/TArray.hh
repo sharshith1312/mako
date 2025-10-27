@@ -1,7 +1,20 @@
-#pragma once
+#ifndef MAKO_STO_TARRAY_HH
+#define MAKO_STO_TARRAY_HH
+
 #include "TWrapped.hh"
 #include "TArrayProxy.hh"
 
+/**
+ * @brief Transactional array implementation for STO
+ * 
+ * A fixed-size array that supports transactional operations.
+ * Provides array semantics with ACID properties when used within
+ * STO transactions.
+ * 
+ * @tparam T Element type
+ * @tparam N Array size (compile-time constant)
+ * @tparam W Wrapper type for versioning (default: TOpaqueWrapped)
+ */
 template <typename T, unsigned N, template <typename> class W = TOpaqueWrapped>
 class TArray : public TObject {
 public:
@@ -15,17 +28,32 @@ public:
     typedef TConstArrayProxy<TArray<T, N, W> > const_proxy_type;
     typedef TArrayProxy<TArray<T, N, W> > proxy_type;
 
+    /**
+     * @brief Get the size of the array
+     * @return Array size (compile-time constant N)
+     */
     size_type size() const {
         return N;
     }
 
-    const_proxy_type operator[](size_type i) const {
-        assert(i < N);
-        return const_proxy_type(this, i);
+    /**
+     * @brief Access element at index (const version)
+     * @param index Index to access
+     * @return Const proxy for transactional access
+     */
+    const_proxy_type operator[](size_type index) const {
+        assert(index < N);
+        return const_proxy_type(this, index);
     }
-    proxy_type operator[](size_type i) {
-        assert(i < N);
-        return proxy_type(this, i);
+    
+    /**
+     * @brief Access element at index (mutable version)
+     * @param index Index to access
+     * @return Proxy for transactional access
+     */
+    proxy_type operator[](size_type index) {
+        assert(index < N);
+        return proxy_type(this, index);
     }
 
     inline iterator begin();
@@ -35,34 +63,61 @@ public:
     inline const_iterator begin() const;
     inline const_iterator end() const;
 
-    // transGet and friends
-    get_type transGet(size_type i) const {
-        assert(i < N);
-        auto item = Sto::item(this, i);
+    /**
+     * @brief Transactional read of element at index
+     * @param index Index to read from
+     * @return Element value
+     */
+    get_type transGet(size_type index) const {
+        assert(index < N);
+        auto item = Sto::item(this, index);
         if (item.has_write())
             return item.template write_value<T>();
         else
-            return data_[i].v.read(item, data_[i].vers);
+            return data_[index].v.read(item, data_[index].vers);
     }
-    void transPut(size_type i, T x) const {
-        assert(i < N);
-        Sto::item(this, i).add_write(x);
-    }
-
-    get_type nontrans_get(size_type i) const {
-        assert(i < N);
-        return data_[i].v.access();
-    }
-    void nontrans_put(size_type i, const T& x) {
-        assert(i < N);
-        data_[i].v.access() = x;
-    }
-    void nontrans_put(size_type i, T&& x) {
-        assert(i < N);
-        data_[i].v.access() = std::move(x);
+    
+    /**
+     * @brief Transactional write of element at index
+     * @param index Index to write to
+     * @param value Value to write
+     */
+    void transPut(size_type index, T value) const {
+        assert(index < N);
+        Sto::item(this, index).add_write(value);
     }
 
-    // transactional methods
+    /**
+     * @brief Non-transactional read of element at index
+     * @param index Index to read from
+     * @return Element value (unsafe - no transaction protection)
+     */
+    get_type nontrans_get(size_type index) const {
+        assert(index < N);
+        return data_[index].v.access();
+    }
+    
+    /**
+     * @brief Non-transactional write of element at index (copy)
+     * @param index Index to write to
+     * @param value Value to write
+     */
+    void nontrans_put(size_type index, const T& value) {
+        assert(index < N);
+        data_[index].v.access() = value;
+    }
+    
+    /**
+     * @brief Non-transactional write of element at index (move)
+     * @param index Index to write to
+     * @param value Value to move
+     */
+    void nontrans_put(size_type index, T&& value) {
+        assert(index < N);
+        data_[index].v.access() = std::move(value);
+    }
+
+    // Transactional interface methods
     bool lock(TransItem& item, Transaction& txn) override {
         return txn.try_lock(item, data_[item.key<size_type>()].vers);
     }
@@ -70,15 +125,18 @@ public:
         return item.check_version(data_[item.key<size_type>()].vers);
     }
     void install(TransItem& item, Transaction& txn) override {
-        size_type i = item.key<size_type>();
-        data_[i].v.write(item.write_value<T>());
-        txn.set_version_unlock(data_[i].vers, item);
+        size_type index = item.key<size_type>();
+        data_[index].v.write(item.write_value<T>());
+        txn.set_version_unlock(data_[index].vers, item);
     }
     void unlock(TransItem& item) override {
         data_[item.key<size_type>()].vers.unlock();
     }
 
 private:
+    /**
+     * @brief Array element with version and wrapped value
+     */
     struct elem {
         version_type vers;
         W<T> v;
@@ -245,3 +303,5 @@ template <typename T, unsigned N, template <typename> class W>
 inline auto TArray<T, N, W>::end() const -> const_iterator {
     return const_iterator(this, N);
 }
+
+#endif /* MAKO_STO_TARRAY_HH */

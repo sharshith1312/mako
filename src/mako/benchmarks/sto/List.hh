@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MAKO_STO_LIST_HH
+#define MAKO_STO_LIST_HH
 
 #include "TaggedLow.hh"
 #include "Interface.hh"
@@ -19,6 +20,19 @@ public:
 
 template <typename T, bool Duplicates = false, typename Compare = DefaultCompare<T>, bool Sorted = true, bool Opacity = true> class ListIterator;
 
+/**
+ * @brief Transactional linked list implementation for STO
+ * 
+ * A linked list that supports transactional operations with configurable
+ * sorting, duplicate handling, and opacity checking. Provides list semantics
+ * with ACID properties when used within STO transactions.
+ * 
+ * @tparam T Element type
+ * @tparam Duplicates Whether to allow duplicate elements
+ * @tparam Compare Comparison function for sorting
+ * @tparam Sorted Whether to maintain sorted order
+ * @tparam Opacity Whether to use opacity checking
+ */
 template <typename T, bool Duplicates = false, typename Compare = DefaultCompare<T>, bool Sorted = true, bool Opacity = true>
 class List 
 #ifndef STO_NO_STM
@@ -28,7 +42,11 @@ class List
   friend class ListIterator<T, Duplicates, Compare, Sorted, Opacity>;
   typedef ListIterator<T, Duplicates, Compare, Sorted, Opacity> iterator;
 public:
-  List(Compare comp = Compare()) : head_(NULL), listsize_(0), listlock_(0), listversion_(0), comp_(comp) {
+  /**
+   * @brief Construct an empty list
+   * @param comp Comparison function for sorting (if Sorted=true)
+   */
+  List(Compare comp = Compare()) : head_(nullptr), listsize_(0), listlock_(0), listversion_(0), comp_(comp) {
   }
 
 private:
@@ -44,14 +62,20 @@ public:
     static constexpr TransItem::flags_type delete_bit = TransItem::user0_bit<<1;
     static constexpr TransItem::flags_type doupdate_bit = TransItem::user0_bit<<2;
 
+  /**
+   * @brief Node structure for the linked list
+   */
   struct list_node {
-    list_node(const T& val, list_node *next, bool invalid)
-      : val(val), next(next), vers(Sto::initialized_tid() | (invalid ? (invalid_bit | TransactionTid::lock_bit | TThread::id()) : 0)) {
+    list_node(const T& value, list_node *next_node, bool invalid)
+      : val(value), next(next_node), vers(Sto::initialized_tid() | (invalid ? (invalid_bit | TransactionTid::lock_bit | TThread::id()) : 0)) {
     }
 
-    // used for delete commit
-    void mark_invalid(bool Txnal) {
-      assert(!Txnal || vers.is_locked_here());
+    /**
+     * @brief Mark node as invalid (used for delete commit)
+     * @param is_transactional Whether this is a transactional operation
+     */
+    void mark_invalid(bool is_transactional) {
+      assert(!is_transactional || vers.is_locked_here());
       auto new_version = vers | invalid_bit;
       fence();
       vers = new_version;
@@ -89,79 +113,107 @@ public:
   // Can't have non-NULL constexpr pointer
   static inline list_node* size_key() { return (list_node*)1; }
 
-  bool find(const T& elem, T& val) {
-    auto *ret = _find(elem);
-    if (ret) {
-      val = ret->val;
+  /**
+   * @brief Find element and copy its value
+   * @param element Element to search for
+   * @param value Reference to store found value
+   * @return true if element found, false otherwise
+   */
+  bool find(const T& element, T& value) {
+    auto *result = _find(element);
+    if (result) {
+      value = result->val;
     }
-    return !!ret;
+    return !!result;
   }
 
-  T* find(const T& elem) {
-    auto *ret = _find(elem);
-    if (ret) {
-      return &ret->val;
+  /**
+   * @brief Find element and return pointer to its value
+   * @param element Element to search for
+   * @return Pointer to value if found, nullptr otherwise
+   */
+  T* find(const T& element) {
+    auto *result = _find(element);
+    if (result) {
+      return &result->val;
     }
-    return NULL;
+    return nullptr;
   }
 
-  list_node* _find(const T& elem) {
-    list_node *cur = head_;
-    while (cur != NULL) {
-      int c = comp_(cur->val, elem);
-      if (c == 0) {
-        return cur;
+  /**
+   * @brief Internal find implementation
+   * @param element Element to search for
+   * @return Pointer to node if found, nullptr otherwise
+   */
+  list_node* _find(const T& element) {
+    list_node *current = head_;
+    while (current != nullptr) {
+      int comparison = comp_(current->val, element);
+      if (comparison == 0) {
+        return current;
       }
-      if (Sorted && c > 0) {
-        return NULL;
+      if (Sorted && comparison > 0) {
+        return nullptr;
       }
-      cur = cur->next;
+      current = current->next;
     }
-    return NULL;
+    return nullptr;
   }
 
-  template <bool Txnal = false>
-  list_node* _insert(const T& elem, bool *inserted = NULL) {
+  /**
+   * @brief Internal insert implementation
+   * @tparam IsTransactional Whether this is a transactional operation
+   * @param element Element to insert
+   * @param inserted Optional pointer to store insertion result
+   * @return Pointer to inserted or existing node
+   */
+  template <bool IsTransactional = false>
+  list_node* _insert(const T& element, bool *inserted = nullptr) {
     if (inserted)
       *inserted = true;
     lock(listlock_);
     if (!Sorted && !Duplicates) {
-      list_node *new_head = new list_node(elem, head_, Txnal);
+      list_node *new_head = new list_node(element, head_, IsTransactional);
       head_ = new_head;
       unlock(listlock_);
       return new_head;
     }
 
-    list_node *prev = NULL;
-    list_node *cur = head_;
-    while (cur != NULL) {
-      int c = comp_(cur->val, elem);
-      if (!Duplicates && c == 0) {
+    list_node *previous = nullptr;
+    list_node *current = head_;
+    while (current != nullptr) {
+      int comparison = comp_(current->val, element);
+      if (!Duplicates && comparison == 0) {
         unlock(listlock_);
         if (inserted)
           *inserted = false;
-        return cur;
-      } else if (Sorted && c >= 0) {
+        return current;
+      } else if (Sorted && comparison >= 0) {
         break;
       }
-      prev = cur;
-      cur = cur->next;
+      previous = current;
+      current = current->next;
     }
-    auto ret = new list_node(elem, cur, Txnal);
-    if (prev) {
-        prev->next = ret;
+    auto new_node = new list_node(element, current, IsTransactional);
+    if (previous) {
+        previous->next = new_node;
     } else {
-        head_ = ret;
+        head_ = new_node;
     }
-    if (!Txnal)
+    if (!IsTransactional)
       listsize_++;
     unlock(listlock_);
-    return ret;
+    return new_node;
   }
 
-  bool insert(const T& elem) {
+  /**
+   * @brief Insert element into the list (non-transactional)
+   * @param element Element to insert
+   * @return true if inserted, false if already exists (when Duplicates=false)
+   */
+  bool insert(const T& element) {
     bool inserted;
-    _insert<false>(elem, &inserted);
+    _insert<false>(element, &inserted);
     return inserted;
   }
 
@@ -678,4 +730,4 @@ private:
     list_node * myPtr;
 };
 
-
+#endif /* MAKO_STO_LIST_HH */
