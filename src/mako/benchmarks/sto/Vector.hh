@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MAKO_STO_VECTOR_HH
+#define MAKO_STO_VECTOR_HH
 
 #include "config.h"
 #include "compiler.hh"
@@ -12,12 +13,35 @@
 #include "rwlock.hh"
 #include <stdexcept>
 
-#define IT_SIZE 10000
-#define log2(x) ceil(log((double) size) / log(2.0))
+namespace mako {
+namespace sto {
+namespace constants {
+    constexpr size_t DEFAULT_ITERATOR_SIZE = 10000;
+    constexpr double LOG_BASE_2 = 2.0;
+}
+}
+}
+
+// Helper function to calculate log2 ceiling
+inline size_t calculate_log2_ceil(size_t size) {
+    return static_cast<size_t>(ceil(log(static_cast<double>(size)) / log(mako::sto::constants::LOG_BASE_2)));
+}
 
 template<typename T, bool Opacity = false, typename Elem = Box<T>, bool SmartIterator = true> class Vector;
 template<typename T, bool Opacity = false, typename Elem = Box<T>, bool SmartIterator = true> class VecIterator;
 
+/**
+ * @brief Transactional vector implementation for STO
+ * 
+ * A dynamic array that supports transactional operations including
+ * reads, writes, insertions, and deletions. Provides ACID properties
+ * when used within STO transactions.
+ * 
+ * @tparam T Element type
+ * @tparam Opacity Whether to use opacity checking for consistency
+ * @tparam Elem Element wrapper type (default: Box<T>)
+ * @tparam SmartIterator Whether to use smart iterator optimization
+ */
 template <typename T, bool Opacity, typename Elem, bool SmartIterator>
 class Vector : public TObject {
 public:
@@ -59,39 +83,51 @@ public:
   
   Vector(size_type size): resize_lock_() {
     size_ = 0;
-    capacity_ = 1 << ((int) log2(size));
+    capacity_ = 1 << static_cast<int>(calculate_log2_ceil(size));
     vecversion_ = 0;
     
     data_ = new Elem[capacity_];
   }
   
+  /**
+   * @brief Reserve capacity for at least new_capacity elements
+   * @param new_capacity Minimum capacity to reserve
+   */
   void reserve(size_type new_capacity) {
     if (new_capacity <= capacity_)
       return;
-    Elem * new_data = new Elem[new_capacity];
+    
+    Elem* new_data = new Elem[new_capacity];
     
     resize_lock_.write_lock();
+    // Copy existing elements to new storage
     for (size_type i = 0; i < capacity_; i++) {
       new_data[i] = data_[i];
     }
     capacity_ = new_capacity;
-    if (data_ != NULL)
+    if (data_ != nullptr) {
       Transaction::rcu_delete_array(data_);
+    }
     data_ = new_data;
     resize_lock_.write_unlock();
   }
   
-  void push_back(const value_type& v) {
-    if (trans_size_offs() < 0) {
-      // There are some deleted items in the array, we need to overwrite them
-      auto item = Sto::item(this, size_ + trans_size_offs());
-      if (!item.has_write() || ! has_delete(item)) {
-        // some other transaction has pushed items in the mean time, so abort
+  /**
+   * @brief Add element to the end of the vector transactionally
+   * @param value Element to add
+   */
+  void push_back(const value_type& value) {
+    int size_offset = trans_size_offs();
+    if (size_offset < 0) {
+      // There are deleted items in the array, we need to overwrite them
+      auto item = Sto::item(this, size_ + size_offset);
+      if (!item.has_write() || !has_delete(item)) {
+        // Another transaction has modified items in the meantime, so abort
         Sto::abort();
       } else {
         item.clear_write();
         item.clear_flags(delete_bit);
-        item.add_write(v);
+        item.add_write(value);
         add_trans_size_offs(1);
       }
       return;
@@ -99,21 +135,24 @@ public:
     auto item = Sto::item(this, push_back_key);
     if (item.has_write()) {
       if (!is_list(item)) {
-        auto& val = item.template write_value<T>();
+        // Convert single value to list
+        auto& existing_value = item.template write_value<T>();
         std::vector<T> write_list;
-        write_list.push_back(val);
-        write_list.push_back(v);
+        write_list.push_back(existing_value);
+        write_list.push_back(value);
         item.clear_write();
         item.add_write(write_list);
         item.add_flags(list_bit);
       }
       else {
+        // Append to existing list
         auto& write_list = item.template write_value<std::vector<T>>();
-        write_list.push_back(v);
+        write_list.push_back(value);
       }
     }
     else {
-      item.add_write(v);
+      // First write for this transaction
+      item.add_write(value);
       item.clear_flags(list_bit);
     }
     add_lock_vector_item();
@@ -125,19 +164,25 @@ public:
     ++size_;
   }
   
+  /**
+   * @brief Remove the last element from the vector transactionally
+   */
   void pop_back() {
     auto item = Sto::item(this, push_back_key);
     if (item.has_write()) {
       if (!is_list(item)) {
+        // Single pending write - just remove it
         item.clear_write();
         add_trans_size_offs(-1);
         return;
       }
       else {
-        /* list */
-        auto& write_list= item.template write_value<std::vector<T>>();
+        // Multiple pending writes - remove the last one
+        auto& write_list = item.template write_value<std::vector<T>>();
         write_list.pop_back();
-        if (write_list.size() == 0) item.clear_write();
+        if (write_list.empty()) {
+          item.clear_write();
+        }
         add_trans_size_offs(-1);
         return;
       }
@@ -182,49 +227,75 @@ public:
     return pos;
   }
   
+  /**
+   * @brief Get the current size of the vector (including transactional changes)
+   * @return Current size including pending transactional modifications
+   */
   size_type size() {
     add_vector_version(TransactionTid::unlocked(vecversion_));
     acquire_fence();
     return size_ + trans_size_offs();
   }
   
-  bool checkSize(size_type sz) {
+  /**
+   * @brief Check if the vector size matches the expected size
+   * @param expected_size Expected size to check against
+   * @return true if size matches, false otherwise
+   */
+  bool checkSize(size_type expected_size) {
     if (!SmartIterator) {
-      return size() == sz;
+      return size() == expected_size;
     }
-    size_type size = size_;
-    int32_t offset = trans_size_offs();
     
-    int32_t pred = (sz - offset) << value_shift;
-    if (size + offset == sz) {
-    } else if (size + offset > sz) {
-      pred |= geq_mask;
+    size_type current_size = size_;
+    int32_t transaction_offset = trans_size_offs();
+    
+    int32_t predicate = (expected_size - transaction_offset) << value_shift;
+    size_type actual_size = current_size + transaction_offset;
+    
+    if (actual_size == expected_size) {
+      // Exact match
+    } else if (actual_size > expected_size) {
+      predicate |= geq_mask;
     } else {
+      // Size is less than expected - abort
       Sto::abort();
     }
     auto item = Sto::item(this, size_pred_key);
     if (item.has_predicate()) {
-      int32_t old_pred = item.template predicate_value<int32_t>();
-      // Add the covering predicate of the old predicate and the new one.
-      if (pred == old_pred || (old_pred & pred & geq_mask))
-        pred = pred >= old_pred ? pred : old_pred;
-      else if ((old_pred & geq_mask) && old_pred <= (pred | geq_mask))
-      /* OK */;
-      else if ((pred & geq_mask) && pred <= (old_pred | geq_mask))
-        pred = old_pred;
-      else
+      int32_t existing_predicate = item.template predicate_value<int32_t>();
+      // Combine the existing predicate with the new one
+      if (predicate == existing_predicate || (existing_predicate & predicate & geq_mask)) {
+        predicate = predicate >= existing_predicate ? predicate : existing_predicate;
+      } else if ((existing_predicate & geq_mask) && existing_predicate <= (predicate | geq_mask)) {
+        // Existing predicate is compatible
+      } else if ((predicate & geq_mask) && predicate <= (existing_predicate | geq_mask)) {
+        predicate = existing_predicate;
+      } else {
+        // Incompatible predicates - abort
         Sto::abort();
+      }
     }
-    item.set_predicate(pred);
-    return size + offset == sz;
+    item.set_predicate(predicate);
+    return actual_size == expected_size;
   }
   
+  /**
+   * @brief Get the non-transactional size (ignores pending changes)
+   * @return Base size without transactional modifications
+   */
   size_type nontrans_size() const {
     return size_;
   }
-  T nontrans_get(key_type i) const {
-    assert(i < size_);
-    return data_[i].unsafe_read();
+  
+  /**
+   * @brief Non-transactional read of element at index
+   * @param index Index to read from
+   * @return Element value (unsafe - no transaction protection)
+   */
+  T nontrans_get(key_type index) const {
+    assert(index < size_);
+    return data_[index].unsafe_read();
   }
   
   proxy_type front() {
@@ -253,35 +324,47 @@ public:
     return proxy_type(this, i);
   }
   
-  value_type transGet(const key_type& i) const {
-    Version ver = vecversion_;
+  /**
+   * @brief Transactional read of element at index
+   * @param index Index to read from
+   * @return Element value
+   * @throws std::out_of_range if index is out of bounds
+   */
+  value_type transGet(const key_type& index) const {
+    Version version = vecversion_;
     acquire_fence();
-    size_type size = size_;
+    size_type current_size = size_;
     acquire_fence();
-    if (i >= size + trans_size_offs()) {
+    
+    size_type effective_size = current_size + trans_size_offs();
+    if (index >= effective_size) {
       Sto::check_opacity(); // TODO: this should also check predicates
       throw std::out_of_range("Vector::transGet");
     }
-    if (i < size)
-      return data_[i].transRead(Sto::item(this, i));
-    else {
-      int diff = i - size;
+    
+    if (index < current_size) {
+      // Read from existing storage
+      return data_[index].transRead(Sto::item(this, index));
+    } else {
+      // Read from pending writes
+      int pending_index = index - current_size;
       
-      auto extra_items = Sto::item(this, push_back_key);
-      // We need to register the vecversion_ to invalidate other concurrent push_backs.
-      add_vector_version(TransactionTid::unlocked(ver));
-      if (extra_items.has_write()) {
-        if (is_list(extra_items)) {
-          auto& write_list= extra_items.template write_value<std::vector<T>>();
+      auto pending_items = Sto::item(this, push_back_key);
+      // Register the vector version to invalidate concurrent push_backs
+      add_vector_version(TransactionTid::unlocked(version));
+      
+      if (pending_items.has_write()) {
+        if (is_list(pending_items)) {
+          auto& write_list = pending_items.template write_value<std::vector<T>>();
           if (!write_list.empty()) {
-            return write_list[diff];
+            return write_list[pending_index];
+          } else {
+            assert(false);
           }
-          else assert(false);
-        }
-        // not a list, has exactly one element
-        else {
-          assert(diff == 0);
-          return extra_items.template write_value<T>();
+        } else {
+          // Single pending write
+          assert(pending_index == 0);
+          return pending_items.template write_value<T>();
         }
       }
       assert(false);
@@ -640,3 +723,5 @@ private:
     size_t myPtr;
     bool endy;
   };
+
+#endif /* MAKO_STO_VECTOR_HH */

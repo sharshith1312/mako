@@ -1,5 +1,5 @@
-#ifndef _UTIL_H_
-#define _UTIL_H_
+#ifndef MAKO_UTIL_H
+#define MAKO_UTIL_H
 
 #include <iostream>
 #include <sstream>
@@ -26,9 +26,29 @@ typedef std::chrono::high_resolution_clock Clock;
 
 namespace util {
 
+// Configuration constants
+namespace constants {
+    constexpr unsigned long RANDOM_SEED_MULTIPLIER = 0x5DEECE66DL;
+    constexpr unsigned long RANDOM_SEED_ADDEND = 0xBL;
+    constexpr unsigned long RANDOM_SEED_MASK = (1L << 48) - 1;
+    constexpr unsigned long RANDOM_SEED_XOR = 0x5DEECE66DL;
+    constexpr size_t NANOSECONDS_PER_MILLISECOND = 1000000;
+    constexpr double MICROSECONDS_PER_MILLISECOND = 1000.0;
+    constexpr size_t RANDOM_DOUBLE_PRECISION_BITS = 53;
+    constexpr size_t READABLE_CHAR_COUNT = 6;
+}
+
 static bool enable_thread_yield = true;
 
-// padded, aligned primitives
+/**
+ * @brief Cache-line aligned and padded element wrapper
+ * 
+ * Ensures that the wrapped element is aligned to cache line boundaries
+ * and padded to prevent false sharing in multi-threaded environments.
+ * 
+ * @tparam T Element type to wrap
+ * @tparam Pedantic If true, performs runtime alignment assertions
+ */
 template <typename T, bool Pedantic = true>
 class aligned_padded_elem {
 public:
@@ -213,10 +233,14 @@ slow_round_down(T x, T q)
   return x - r;
 }
 
-// not thread-safe
-//
-// taken from java:
-//   http://developer.classpath.org/doc/java/util/Random-source.html
+/**
+ * @brief Fast pseudo-random number generator
+ * 
+ * Linear congruential generator based on Java's Random implementation.
+ * NOT thread-safe - each thread should have its own instance.
+ * 
+ * Reference: http://developer.classpath.org/doc/java/util/Random-source.html
+ */
 class fast_random {
 public:
   fast_random(unsigned long seed)
@@ -247,7 +271,7 @@ public:
   inline double
   next_uniform()
   {
-    return (((unsigned long) next(26) << 27) + next(27)) / (double) (1L << 53);
+    return (((unsigned long) next(26) << 27) + next(27)) / (double) (1L << constants::RANDOM_DOUBLE_PRECISION_BITS);
   }
 
   inline char
@@ -260,7 +284,7 @@ public:
   next_readable_char()
   {
     static const char readables[] = "0123456789@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
-    return readables[next(6)];
+    return readables[next(constants::READABLE_CHAR_COUNT)];
   }
 
   inline std::string
@@ -297,13 +321,13 @@ private:
   inline void
   set_seed0(unsigned long seed)
   {
-    this->seed = (seed ^ 0x5DEECE66DL) & ((1L << 48) - 1);
+    this->seed = (seed ^ constants::RANDOM_SEED_XOR) & constants::RANDOM_SEED_MASK;
   }
 
   inline unsigned long
   next(unsigned int bits)
   {
-    seed = (seed * 0x5DEECE66DL + 0xBL) & ((1L << 48) - 1);
+    seed = (seed * constants::RANDOM_SEED_MULTIPLIER + constants::RANDOM_SEED_ADDEND) & constants::RANDOM_SEED_MASK;
     return (unsigned long) (seed >> (48 - bits));
   }
 
@@ -340,7 +364,7 @@ pclock(char *msg, clockid_t cid)
   if (clock_gettime(cid, &ts) == -1)
     printf("%s [ERROR] clock_gettime", msg);
   else
-    printf("%s %4jd.%03ld\n", msg, (intmax_t) ts.tv_sec, ts.tv_nsec / 1000000);
+    printf("%s %4jd.%03ld\n", msg, (intmax_t) ts.tv_sec, ts.tv_nsec / constants::NANOSECONDS_PER_MILLISECOND);
 }
 
 /**
@@ -360,6 +384,12 @@ first_pos_diff(const char *p0, size_t sz0,
   return n;
 }
 
+/**
+ * @brief High-resolution timer for performance measurement
+ * 
+ * Provides microsecond and nanosecond precision timing capabilities.
+ * Non-copyable and non-movable to prevent timing state corruption.
+ */
 class timer {
 private:
   timer(const timer &) = delete;
@@ -397,7 +427,7 @@ public:
   inline double
   lap_ms()
   {
-    return lap() / 1000.0;
+    return lap() / constants::MICROSECONDS_PER_MILLISECOND;
   }
 
   static inline uint64_t
@@ -428,7 +458,7 @@ public:
   ~scoped_timer()
   {
     if (enabled) {
-      const double x = t.lap() / 1000.0; // ms
+      const double x = t.lap() / constants::MICROSECONDS_PER_MILLISECOND; // ms
       std::cerr << "timed region " << region << " took " << x << " ms" << std::endl;
     }
   }
@@ -457,7 +487,15 @@ struct std_pair_first_cmp {
   }
 };
 
-// deal with small container opt vectors correctly
+/**
+ * @brief Vector type selector with small container optimization
+ * 
+ * Conditionally selects between silo_small_vector (with inline storage)
+ * and std::vector based on compile-time configuration.
+ * 
+ * @tparam T Element type
+ * @tparam SmallSize Number of elements to store inline
+ */
 template <typename T, size_t SmallSize = SMALL_SIZE_VEC>
 struct vec {
 #ifdef USE_SMALL_CONTAINER_OPT
@@ -548,30 +586,39 @@ MakeRange(T start, T end)
   return ret;
 }
 
+/**
+ * @brief Utilities for timespec arithmetic
+ */
 struct timespec_utils {
-	// thanks austin
+	/**
+	 * @brief Subtract two timespec values (x - y = out)
+	 * @param x Minuend timespec
+	 * @param y Subtrahend timespec  
+	 * @param out Result of subtraction
+	 */
 	static void
 	subtract(const struct timespec *x,
 					 const struct timespec *y,
 					 struct timespec *out)
 	{
+		constexpr long NANOSECONDS_PER_SECOND = 1000000000L;
+		
 		// Perform the carry for the later subtraction by updating y.
-		struct timespec y2 = *y;
-		if (x->tv_nsec < y2.tv_nsec) {
-			int sec = (y2.tv_nsec - x->tv_nsec) / 1e9 + 1;
-			y2.tv_nsec -= 1e9 * sec;
-			y2.tv_sec += sec;
+		struct timespec y_adjusted = *y;
+		if (x->tv_nsec < y_adjusted.tv_nsec) {
+			int carry_seconds = (y_adjusted.tv_nsec - x->tv_nsec) / NANOSECONDS_PER_SECOND + 1;
+			y_adjusted.tv_nsec -= NANOSECONDS_PER_SECOND * carry_seconds;
+			y_adjusted.tv_sec += carry_seconds;
 		}
-		if (x->tv_nsec - y2.tv_nsec > 1e9) {
-			int sec = (x->tv_nsec - y2.tv_nsec) / 1e9;
-			y2.tv_nsec += 1e9 * sec;
-			y2.tv_sec -= sec;
+		if (x->tv_nsec - y_adjusted.tv_nsec > NANOSECONDS_PER_SECOND) {
+			int borrow_seconds = (x->tv_nsec - y_adjusted.tv_nsec) / NANOSECONDS_PER_SECOND;
+			y_adjusted.tv_nsec += NANOSECONDS_PER_SECOND * borrow_seconds;
+			y_adjusted.tv_sec -= borrow_seconds;
 		}
 
-		// Compute the time remaining to wait.  tv_nsec is certainly
-		// positive.
-		out->tv_sec  = x->tv_sec - y2.tv_sec;
-		out->tv_nsec = x->tv_nsec - y2.tv_nsec;
+		// Compute the time remaining to wait. tv_nsec is certainly positive.
+		out->tv_sec  = x->tv_sec - y_adjusted.tv_sec;
+		out->tv_nsec = x->tv_nsec - y_adjusted.tv_nsec;
 	}
 };
 
@@ -702,8 +749,15 @@ operator<<(std::ostream &o, const std::tuple<Types...> &t)
   return o;
 }
 
-// XXX: so nasty, but some things we want to explictly call their dtors we do
-// this anti-pattern all over the code base, might as well centralize it here
+/**
+ * @brief Manual lifetime management wrapper
+ * 
+ * Provides placement new construction with explicit destructor calls.
+ * Used when automatic RAII is not suitable and manual resource management
+ * is required. The user is responsible for calling destroy() exactly once.
+ * 
+ * @tparam T Type to manage
+ */
 template <typename T>
 class unmanaged {
 public:
@@ -730,7 +784,7 @@ public:
   inline T * obj() { return (T *) &obj_[0]; }
   inline const T * obj() const { return (const T *) &obj_[0]; }
 
-  // syntatic sugar
+  // syntactic sugar
 
   inline T & operator*() { return *obj(); }
   inline const T & operator*() const { return *obj(); }
@@ -744,4 +798,4 @@ private:
 #endif
 } PACKED;
 
-#endif /* _UTIL_H_ */
+#endif /* MAKO_UTIL_H */
