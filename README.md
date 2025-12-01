@@ -73,11 +73,17 @@ make -j32
 # Run all integration tests
 ./ci/ci.sh all
 
-# Run specific tests
+# Run specific integration tests
 ./ci/ci.sh simpleTransaction    # Simple transactions
 ./ci/ci.sh simplePaxos           # Paxos replication
 ./ci/ci.sh shard1Replication     # 1-shard with replication
 ./ci/ci.sh shard2Replication     # 2-shards with replication
+
+# Run unit tests (Silo/STO components)
+cd tests
+./run_tests.sh all               # All unit tests
+cd ../build
+ctest --output-on-failure        # Via CTest
 ```
 
 ---
@@ -197,6 +203,10 @@ make clean         # Clean all build artifacts
 make test                 # Run all tests
 make test-verbose         # Verbose test output
 make test-parallel        # Parallel test execution
+
+# Unit tests (Silo/STO components)
+cd tests
+./run_tests.sh all        # Run all unit tests
 ```
 
 ### Code Organization
@@ -209,7 +219,8 @@ mako/
 │   ├── bench/          # Benchmark implementations (TPC-C, TPC-A)
 │   └── rrr/            # Custom RPC framework
 ├── config/             # YAML configuration files
-├── test/               # Test configurations and scripts
+├── test/               # Integration test configurations and scripts
+├── tests/              # Unit test suite (Silo/STO components)
 ├── third-party/        # External dependencies
 └── rust-lib/           # Rust components
 ```

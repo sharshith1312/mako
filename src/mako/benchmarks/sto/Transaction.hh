@@ -88,6 +88,7 @@
 
 void register_sync_util(std::function<int()>);
 
+// @unsafe: manages raw memory buffers
 class StringAllocator{
  private:
   unsigned char *LOG;
@@ -166,6 +167,7 @@ class StringAllocator{
 //   static void setSTOBatchSize(size_t k){
 //     kSizeLimit = k;
 //   }
+  // @safe
   bool checkPushRequired(){
     if (curr_pos + 1 > max_bytes_size)
         Warning("checkPushRequired: buffer[%d/%d] is not enough!!!!, entries: %d, batch_size: %d", curr_pos, max_bytes_size, entries, batch_size);
@@ -179,16 +181,19 @@ class StringAllocator{
 	  return LOG+curr_pos-size;
     }
   }
+  // @safe
   unsigned char * getLogOnly(size_t& pos){
     pos = curr_pos;
 	return LOG;
   }
 
+  // @safe
   void resetMemory(){
     curr_pos = 0;
     entries = 0;
     latest_commit_timestamp = 0;
   }
+  // @safe
   bool checkLimits(size_t newLogLen){
   	return (curr_pos + newLogLen) < max_bytes_size;
   }
@@ -203,15 +208,18 @@ class StringAllocator{
 	entries++;
   }*/
 
+  // @safe
   inline void update_ptr(const size_t& w){
     entries++;
     curr_pos=w;
   }
 
+  // @safe
   size_t get_max_bytes_size() {
     return max_bytes_size;
   }
 
+  // @unsafe: uses std::max
   inline void update_commit_id(const uint32_t cid) {
     // Single timestamp system: just track the maximum timestamp
     latest_commit_timestamp = std::max(latest_commit_timestamp, cid);
@@ -229,6 +237,8 @@ class StringAllocator{
 	return true;
   }
 };
+
+
 
 inline std::unordered_map<uint32_t, uint32_t> sample_transaction_tracker ;  // local timestamp => updated time (millisecond)
 
@@ -345,7 +355,7 @@ struct __attribute__((aligned(128))) threadinfo_t {
     }
 };
 
-
+// @unsafe: uses mutable fields for interior mutability, complex template instantiations
 class Transaction {
 public:
     static constexpr unsigned tset_initial_capacity = 512;
@@ -382,6 +392,7 @@ public:
     }
 
     void print_stats();
+    // @unsafe: uses pointer address-of
     uint8_t get_current_term() const;
 
     static void clear_stats() {
@@ -1039,6 +1050,7 @@ private:
     Transaction* base_;
 };
 
+// @unsafe: manages Transaction lifecycle
 class TransactionGuard {
   public:
     TransactionGuard() {
@@ -1056,6 +1068,7 @@ class TransactionGuard {
     }
 };
 
+// @unsafe: manages Transaction loop lifecycle
 class TransactionLoopGuard {
   public:
     TransactionLoopGuard() {

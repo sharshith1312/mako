@@ -1,3 +1,4 @@
+// @unsafe: entire file uses STO with complex template instantiations, mutable fields, and interior mutability
 #include "Transaction.hh"
 #include <typeinfo>
 #include <atomic>
@@ -14,6 +15,7 @@
 #endif
 
 std::function<int()> callback_ = nullptr;
+// @safe
 void register_sync_util(std::function<int()> cb) {
     callback_ = cb;
 }
@@ -61,6 +63,7 @@ static void __attribute__((used)) check_static_assertions() {
     static_assert(sizeof(threadinfo_t) % 128 == 0, "threadinfo is 2-cache-line aligned");
 }
 
+// @safe
 void Transaction::initialize() {
     static_assert(tset_initial_capacity % tset_chunk == 0, "tset_initial_capacity not an even multiple of tset_chunk");
     hash_base_ = 32768;
@@ -81,6 +84,7 @@ Transaction::~Transaction() {
             delete[] tset_[i];
 }
 
+// @safe
 void Transaction::refresh_tset_chunk() {
     assert(tset_size_ % tset_chunk == 0);
     assert(tset_size_ < tset_max_capacity);
@@ -89,6 +93,7 @@ void Transaction::refresh_tset_chunk() {
     tset_next_ = tset_[tset_size_ / tset_chunk];
 }
 
+// @unsafe: uses fetch_and_add, usleep, and global epoch manipulation
 void* Transaction::epoch_advancer(void*) {
     static int num_epoch_advancers = 0;
     if (fetch_and_add(&num_epoch_advancers, 1) != 0)
@@ -116,6 +121,7 @@ void* Transaction::epoch_advancer(void*) {
     return NULL;
 }
 
+// @safe
 bool Transaction::preceding_duplicate_read(TransItem* needle) const {
     const TransItem* it = nullptr;
     for (unsigned tidx = 0; ; ++tidx) {
@@ -128,6 +134,7 @@ bool Transaction::preceding_duplicate_read(TransItem* needle) const {
     }
 }
 
+// @unsafe: uses TransItem::read_value, release_fence, and complex transaction validation
 void Transaction::hard_check_opacity(TransItem* item, TransactionTid::type t) {
     // ignore opacity checks during commit; we're in the middle of checking
     // things anyway
@@ -180,6 +187,7 @@ void Transaction::hard_check_opacity(TransItem* item, TransactionTid::type t) {
     state_ = s_in_progress;
 }
 
+// @unsafe: manipulates transaction items with unlock and cleanup operations
 void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
     if (!committed) {
         TXP_INCREMENT(txp_total_aborts);
@@ -255,6 +263,7 @@ after_unlock:
     state_ = s_aborted + committed;
 }
 
+// @safe
 bool Transaction::shard_try_lock_last_writeset() {
     assert(TThread::id() == threadid_);
 
@@ -276,6 +285,7 @@ bool Transaction::shard_try_lock_last_writeset() {
     return true;
 }
 
+// @safe
 int Transaction::shard_validate() {
     //print_stats();
     assert(TThread::id() == threadid_);
@@ -296,6 +306,7 @@ int Transaction::shard_validate() {
     return 0;
 }
 
+// @unsafe: calls unsafe serialize_util function
 void Transaction::shard_serialize_util(uint32_t timestamp) {
     if (!BenchmarkConfig::getInstance().getIsReplicated()) {return ;}
     #if defined(SIMPLE_WORKLOAD)
@@ -306,8 +317,9 @@ void Transaction::shard_serialize_util(uint32_t timestamp) {
     serialize_util(1 /* anything > 0 */, true, MAX_ARRAY_SIZE_IN_BYTES_SMALL, small_batch_num, timestamp);
 }
 
+// @safe
 uint8_t Transaction::get_current_term() const {
-    if(callback_){
+    if(callback_ != nullptr){
         if(!current_term_)
             current_term_ = callback_();
     }else{
@@ -316,6 +328,7 @@ uint8_t Transaction::get_current_term() const {
     return current_term_;
 }
 
+// @unsafe: uses __sync_fetch_and_add and TObject::install
 void Transaction::shard_install(uint32_t timestamp) {
     assert(TThread::id() == threadid_);
 
@@ -341,6 +354,7 @@ void Transaction::shard_install(uint32_t timestamp) {
     }
 }
 
+// @unsafe: calls TObject::unlock and TObject::cleanup
 void Transaction::shard_unlock(bool committed) {
     assert(TThread::id() == threadid_);
 
@@ -364,6 +378,7 @@ void Transaction::shard_unlock(bool committed) {
     }
 }
 
+// @unsafe: complex commit protocol with remote operations, locking, and validation
 bool Transaction::try_commit(bool no_paxos) {
     assert(TThread::id() == threadid_);
 #if ASSERT_TX_SIZE
@@ -617,6 +632,7 @@ abort:
 }
 
 // serialize transactions into log and then sent it out via Paxos
+// @unsafe: performs low-level memory operations with memcpy and raw pointers
 inline void Transaction::serialize_util(unsigned nwriteset, bool on_remote, int max_bytes_size, int batch_size, uint32_t timestamp) const {
     if (nwriteset == 0) return;
 
@@ -815,6 +831,7 @@ inline void Transaction::serialize_util(unsigned nwriteset, bool on_remote, int 
     }
 }
 
+// @unsafe: uses TransItem::key template method and string operations
 void Transaction::print_stats() {
     if (tset_size_ == 0) return;
     TransItem* it = nullptr;
@@ -835,6 +852,7 @@ void Transaction::print_stats() {
     }
 }
 
+// @safe
 const char* Transaction::state_name(int state) {
     static const char* names[] = {"in-progress", "opacity-check", "committing", "committing-locked", "aborted", "committed"};
     if (unsigned(state) < arraysize(names))
@@ -843,6 +861,7 @@ const char* Transaction::state_name(int state) {
         return "unknown-state";
 }
 
+// @unsafe: calls TObject::print with pointer dereference
 void Transaction::print(std::ostream& w) const {
     w << "T0x" << (void*) this << " " << state_name(state_) << " [";
     const TransItem* it = nullptr;
@@ -850,15 +869,18 @@ void Transaction::print(std::ostream& w) const {
         it = (tidx % tset_chunk ? it + 1 : tset_[tidx / tset_chunk]);
         if (tidx)
             w << " ";
-        it->owner()->print(w, *it);
+        const TransItem& item_ref = *it;
+        it->owner()->print(w, item_ref);
     }
     w << "]\n";
 }
 
+// @safe
 void Transaction::print() const {
     print(std::cerr);
 }
 
+// @unsafe: uses TransItem template methods key, read_value, write_value, predicate_value
 void TObject::print(std::ostream& w, const TransItem& item) const {
     w << "{" << typeid(*this).name() << " " << (void*) this << "." << item.key<void*>();
     if (item.has_read())

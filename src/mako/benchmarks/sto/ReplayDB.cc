@@ -1,72 +1,122 @@
-#include "ReplayDB.h"
-#include <random>
-#include <algorithm>
-#include <unordered_set>
+// @unsafe: uses template instantiations with unknown key functions and returns references
 #include "ThreadPool.h"
+#include <stdexcept>
+#include <algorithm>
+#include<string_view>
+#include <unordered_set>
+#include <vector>
+#include "lib/common.h"
 
-// Single timestamp system: extracts timestamp and latency tracker from buffer
-CommitInfo get_latest_commit_info(char *buffer, size_t len) {
-    CommitInfo info;
-    
-    // Single timestamp format: last 2 uint32_t values are [timestamp, latency_tracker]
-    int pos = len - sizeof(uint32_t) * 2;
-    
-    memcpy(&info.timestamp, buffer + pos, sizeof(uint32_t));
-    pos += sizeof(uint32_t);
-    memcpy(&info.latency_tracker, buffer + pos, sizeof(uint32_t));
-    
-    return info;
+thread_local str_arena arena;
+thread_local void *buf = NULL;
+thread_local string obj_k;
+thread_local string obj_v;
+
+// @unsafe: uses memcpy and reinterpret_cast with raw pointers
+void keystore_encode3_v2(std::string& s, uint32_t x) {
+    assert(s.length()>mako::EXTRA_BITS_FOR_VALUE);
+    memcpy ((void *)(s.data() + s.length() - mako::EXTRA_BITS_FOR_VALUE), &x, mako::BITS_OF_TT);
+    // for the later on takeovering from the old leader
+    mako::Node *header = reinterpret_cast<mako::Node *>((char*)(s.data() + s.length() - mako::BITS_OF_NODE));
+    header->data_size = 0;
 }
 
-size_t treplay_in_same_thread_opt_mbta_v2(size_t par_id, char *buffer, size_t len, abstract_db* db, int nshards) {
-    //printf("replay a log, par_id:%d, len:%d\n", par_id, len);
-    len -= sizeof(uint32_t) * 2; // eliminate last timestamp and latency_tracker
-    size_t ULL_LEN = sizeof (uint32_t);
+// @unsafe: uses memcpy with raw pointers
+inline uint32_t keystore_decode3_v2(const std::string& s){
+    uint32_t cid=0;
+    memcpy (&cid, (void *) (s.data () + s.length() - mako::EXTRA_BITS_FOR_VALUE), mako::BITS_OF_TT);
+    return cid;
+}
 
-    std::vector<WrappedLogV2*> _intermediateLogs;
+// @unsafe: calls unsafe keystore_decode3_v2
+bool cmpFunc2_v2(const std::string& newValue,const std::string& oldValue)
+{
+    uint32_t commit_id_new = keystore_decode3_v2(newValue);
+    uint32_t commit_id_old = keystore_decode3_v2(oldValue);
 
-    size_t idx=0;
-    int c_txn=0, c_kv=0;
-    while (idx < len) {
-        // 1. get current shard cid
-        c_txn+=1;
-        uint32_t cid=0;
-        memcpy ((char *) &cid, buffer + idx, ULL_LEN);
-        idx += sizeof(uint32_t);
+    return (commit_id_new%10 > commit_id_old%10) || (commit_id_new/10 > commit_id_old/10);
+}
 
-        // 2. get count of K-V
-        unsigned short int count=0;
-        memcpy ((char *) &count, buffer + idx, sizeof(unsigned short int));
-        idx += sizeof(unsigned short int) ;
-        c_kv+=count;
+// @unsafe: uses reinterpret_cast and memcpy with raw pointers
+size_t getFileContentNew_OneLogOptimized_mbta_v2(char *buffer, /* K-V pairs */
+                                                 uint32_t cid,  /* timestamp on current shard */
+                                                 unsigned short int count,
+                                                 unsigned int len,
+                                                 abstract_db* db) {
+    size_t put_ops = 0;
 
-        // 3. get len of K-V
-        unsigned int _len=0;
-        memcpy ((char *) &_len, buffer + idx, sizeof(unsigned int));
-        idx += sizeof(unsigned int) ;
+    unsigned short int *len_of_K=0, *len_of_V=0, *table_id=0;
+    size_t offset=0;
+    bool delete_true = false;
+    for(int i=0;i<count;i++) {
+        delete_true = false ;
+        // 1. len of K
+        len_of_K = reinterpret_cast<unsigned short int*>(buffer + offset);
+        offset += sizeof(unsigned short int) ;
 
-        // 4. wrap K-V
-        auto on_log = new WrappedLogV2() ;
-        on_log->cid= cid;
-        on_log->count = count;
-        on_log->len = _len;
-        on_log->pairs = (char *)buffer + idx;
+        // 2. content of K
+        // obj_k.assign(buffer + offset, *len_of_K);
+        obj_k.resize(*len_of_K);
+        memcpy(obj_k.data(), buffer + offset, *len_of_K);
 
-        // 5. skip K-V pairs
-        idx += _len ;
+        offset += *len_of_K;
 
-        _intermediateLogs.emplace_back (on_log);
+        // 3. len of V
+        len_of_V = reinterpret_cast<unsigned short int*>(buffer + offset);
+        offset += sizeof(unsigned short int) ;
+
+        // 4. content of V, add an extra sizeof(uint64) bytes
+        obj_v.resize(*len_of_V + mako::EXTRA_BITS_FOR_VALUE);
+        // reset next_ptr on followers (no multi-version)
+        mako::Node *next_ptr = reinterpret_cast<mako::Node *>((char*)(obj_v.data()+obj_v.length()-mako::BITS_OF_NODE));
+        next_ptr->data_size = 0;
+        memcpy((char*)obj_v.data(), buffer+offset, *len_of_V);
+        offset += *len_of_V;
+
+        // 5. table id
+        table_id = reinterpret_cast<unsigned short*>(buffer + offset);
+        offset += sizeof(unsigned short int) ;
+
+        if((*table_id) & (1 << 15)) {
+            delete_true = true;
+            *table_id = (*table_id) ^ (1 << 15);
+        }
+
+        if (*table_id == 0 || *table_id > 10000) {
+            Warning("the table_id: %d", *table_id);
+            exit(1);
+        }
+
+        if (delete_true) {
+            // obj_v.assign(1+mako::EXTRA_BITS_FOR_VALUE, 'B'); // special flags for DELETE
+            obj_v.resize(1+mako::EXTRA_BITS_FOR_VALUE);
+            memset(obj_v.data(), 'B', 1+mako::EXTRA_BITS_FOR_VALUE);
+        }
+
+        // 6. encode value + cid_v
+        keystore_encode3_v2 (obj_v, cid);
+        //keystore_encode3_v2 (value, cid);
+
+        // 7. put it into actual tables
+        int try_cnt = 1 ;
+        while (1) {
+            try {
+                //Warning("Info of KV: # of K: %d, # of V: %d, table_id: %d, is_deleted: %d,key:%s", *len_of_K, obj_v.length(), *table_id, delete_true,mako::printStringAsBit(obj_k).c_str());
+                void *txn = db->new_txn(0, arena, buf, abstract_db::HINT_DEFAULT);
+                abstract_ordered_index *table_index = db->get_index_by_table_id(*table_id) ;
+                table_index->put_mbta(txn, obj_k, cmpFunc2_v2, obj_v);
+                auto ret = db->commit_txn_no_paxos(txn);// we should have ret>0, then retry
+                if (try_cnt > 1 && try_cnt % 20 == 0) {
+                    std::cout << "succeed at retry#:" << try_cnt << std::endl;
+                }
+                break ;
+            } catch (...) {   // if abort happens, replay it until it succeeds
+                // std::cout << "exception, retry#:" << try_cnt << std::endl;
+                try_cnt += 1 ;
+            }
+        }
+        put_ops ++;
     }
 
-    size_t thread_put = 0;
-    auto iter = _intermediateLogs.begin();
-    for (;iter!=_intermediateLogs.end();iter++) {
-        thread_put += getFileContentNew_OneLogOptimized_mbta_v2((*iter)->pairs,
-                                                                (*iter)->cid,
-                                                                (*iter)->count,
-                                                                (*iter)->len,
-                                                                db) ;
-    }
-    //Warning("%d K-V pairs replayed, par_id:%d, total-len: %d, c_txn:%d, c_kv:%d", thread_put, par_id, len, c_txn, c_kv);
-    return thread_put ;
+    return put_ops;
 }

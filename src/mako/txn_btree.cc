@@ -1,3 +1,4 @@
+// @unsafe: file uses complex template instantiations with unknown functions
 #include <unistd.h>
 #include <limits>
 #include <memory>
@@ -73,9 +74,9 @@ AssertFailedCommit(P &t)
   ALWAYS_ASSERT_COND_IN_TXN(t, !t.commit(false));
 }
 
+// @unsafe: interprets an arbitrary byte buffer as a value of type T for equality checks
 template <typename T>
 inline void
-// @unsafe - interprets an arbitrary byte buffer as a value of type T for equality checks
 AssertByteEquality(const T &t, const uint8_t * v, size_t sz)
 {
   ALWAYS_ASSERT(sizeof(T) == sz);
@@ -87,6 +88,7 @@ AssertByteEquality(const T &t, const uint8_t * v, size_t sz)
   }
 }
 
+// @unsafe: calls unsafe AssertByteEquality
 template <typename T>
 inline void
 AssertByteEquality(const T &t, const string &v)
