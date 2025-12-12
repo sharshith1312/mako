@@ -771,42 +771,47 @@ protected:
 
   // SLOW accessor methods- used for invariant checking
 
+  // @safe
   typename read_set_map::iterator
-  find_read_set(const dbtuple *tuple)
+  find_read_set(const dbtuple &tuple)
   {
     // linear scan- returns the *first* entry found
     // (a tuple can exist in the read_set more than once)
     typename read_set_map::iterator it     = read_set.begin();
     typename read_set_map::iterator it_end = read_set.end();
     for (; it != it_end; ++it)
-      if (it->get_tuple() == tuple)
+      if (it->get_tuple() == &tuple) // Safe address comparison
         break;
     return it;
   }
 
+  // @safe
   inline typename read_set_map::const_iterator
-  find_read_set(const dbtuple *tuple) const
+  find_read_set(const dbtuple &tuple) const
   {
     return const_cast<transaction *>(this)->find_read_set(tuple);
   }
 
+  // @safe
   typename write_set_map::iterator
-  find_write_set(dbtuple *tuple)
+  find_write_set(dbtuple &tuple)
   {
     // linear scan- returns the *first* entry found
     // (a tuple can exist in the write_set more than once)
     typename write_set_map::iterator it     = write_set.begin();
     typename write_set_map::iterator it_end = write_set.end();
     for (; it != it_end; ++it)
-      if (it->get_tuple() == tuple)
+      if (it->get_tuple() == &tuple) // Safe address comparison
         break;
     return it;
   }
 
+  // @safe
   inline typename write_set_map::const_iterator
-  find_write_set(const dbtuple *tuple) const
+  find_write_set(const dbtuple &tuple) const
   {
-    return const_cast<transaction *>(this)->find_write_set(tuple);
+    // const_cast needed because the non-const implementation requires non-const ref
+    return const_cast<transaction *>(this)->find_write_set(const_cast<dbtuple &>(tuple));
   }
 
   inline bool
