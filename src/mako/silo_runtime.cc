@@ -56,7 +56,7 @@ rusty::Arc<SiloRuntime> SiloRuntime::Create() {
     return rusty::Arc<SiloRuntime>::make();
 }
 
-// @safe
+// @unsafe
 void SiloRuntime::BindCurrentThread(SiloRuntime* runtime) {
     // @unsafe {
     // Store raw pointer in thread-local storage
@@ -80,7 +80,7 @@ SiloRuntime* SiloRuntime::Current() {
     return GlobalDefault();
 }
 
-// @safe
+// @unsafe
 // @lifetime: &'static
 SiloRuntime* SiloRuntime::GlobalDefault() {
     // Fast path: already initialized
@@ -103,14 +103,14 @@ SiloRuntime* SiloRuntime::GlobalDefault() {
 // Core ID Management
 // =========================================================================
 
-// @safe
+// @unsafe
 unsigned SiloRuntime::allocate_core_id() {
     unsigned id = core_count_.fetch_add(1, std::memory_order_acq_rel);
     ALWAYS_ASSERT(id < NMaxCores);
     return id;
 }
 
-// @safe
+// @unsafe
 int SiloRuntime::allocate_contiguous_aligned_block(unsigned n, unsigned alignment) {
     using namespace util;
 retry:

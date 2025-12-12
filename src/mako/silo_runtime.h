@@ -97,7 +97,7 @@ public:
     // Returns Arc for thread-safe shared ownership
     static rusty::Arc<SiloRuntime> Create();
 
-    // @safe
+    // @unsafe
     // Thread binding - associate current thread with a runtime
     // @param runtime: borrowed reference, caller retains ownership
     static void BindCurrentThread(SiloRuntime* runtime);
@@ -109,7 +109,7 @@ public:
     // Returns the default global runtime if none bound
     static SiloRuntime* Current();
 
-    // @safe
+    // @unsafe
     // @lifetime: &'static
     // Get the default global runtime (for backward compatibility)
     static SiloRuntime* GlobalDefault();
@@ -135,19 +135,19 @@ public:
     // Maximum cores per runtime
     static const unsigned NMaxCores = NMAXCORES;
 
-    // @safe
+    // @unsafe
     // Allocate a new core ID from this runtime's ID space
     // Returns the allocated core ID
     // Thread-safe: uses atomic fetch_add
     unsigned allocate_core_id();
 
-    // @unsafe: uses atomic operations
+    // @unsafe: uses atomic operations (even loads can be part of race conditions)
     // Get the current core count for this runtime
     unsigned core_count() const {
         return core_count_.load(std::memory_order_acquire);
     }
 
-    // @safe
+    // @unsafe
     // Allocate a contiguous block of core IDs with alignment
     // Returns the starting core ID, or -1 if allocation would exceed max
     int allocate_contiguous_aligned_block(unsigned n, unsigned alignment);
@@ -172,11 +172,13 @@ public:
     void FaultRegion(size_t cpu);
     void DumpStats();
 
+    // @safe - Simple pointer range check (read-only)
     // Check if pointer is managed by this runtime's allocator
     bool ManagesPointer(const void *p) const {
         return p >= alloc_.memstart && p < alloc_.memend;
     }
 
+    // @safe - Pure arithmetic computation with safe assertions
     // Get CPU index for a pointer (assumes ManagesPointer is true)
     size_t PointerToCpu(const void *p) const;
 
