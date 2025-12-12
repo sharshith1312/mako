@@ -145,6 +145,7 @@ public:
     INVARIANT(state == TXN_ACTIVE);
   }
 
+  // @safe - Returns copy of primitive member variable
   inline uint64_t
   get_flags() const
   {
@@ -647,12 +648,15 @@ public:
 
   std::map<std::string, uint64_t> get_txn_counters() const;
 
+  // @safe - Pure boolean logic with bitwise operations
   inline ALWAYS_INLINE bool
   is_snapshot() const
   {
     return get_flags() & TXN_FLAG_READ_ONLY;
   }
 
+  // @safe
+  // @lifetime: (&'self) -> &'self - Returns reference tied to object lifetime
   // for debugging purposes only
   inline const read_set_map &
   get_read_set() const
@@ -660,12 +664,16 @@ public:
     return read_set;
   }
 
+  // @safe
+  // @lifetime: (&'self) -> &'self - Returns reference tied to object lifetime
   inline const write_set_map &
   get_write_set() const
   {
     return write_set;
   }
 
+  // @safe
+  // @lifetime: (&'self) -> &'self - Returns reference tied to object lifetime
   inline const absent_set_map &
   get_absent_set() const
   {
