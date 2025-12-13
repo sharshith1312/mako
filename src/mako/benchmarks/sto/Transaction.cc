@@ -84,7 +84,7 @@ Transaction::~Transaction() {
             delete[] tset_[i];
 }
 
-// @safe
+// @unsafe: uses new operator and array allocation
 void Transaction::refresh_tset_chunk() {
     assert(tset_size_ % tset_chunk == 0);
     assert(tset_size_ < tset_max_capacity);
@@ -121,7 +121,7 @@ void* Transaction::epoch_advancer(void*) {
     return NULL;
 }
 
-// @safe
+// @unsafe: may trigger template instantiations with bitwise operators
 bool Transaction::preceding_duplicate_read(TransItem* needle) const {
     const TransItem* it = nullptr;
     for (unsigned tidx = 0; ; ++tidx) {
@@ -263,7 +263,7 @@ after_unlock:
     state_ = s_aborted + committed;
 }
 
-// @safe
+// @unsafe: calls TObject::lock which may trigger template instantiations with bitwise operators
 bool Transaction::shard_try_lock_last_writeset() {
     assert(TThread::id() == threadid_);
 
@@ -285,7 +285,7 @@ bool Transaction::shard_try_lock_last_writeset() {
     return true;
 }
 
-// @safe
+// @unsafe: calls TObject::check which may trigger template instantiations with bitwise operators
 int Transaction::shard_validate() {
     //print_stats();
     assert(TThread::id() == threadid_);
@@ -317,7 +317,7 @@ void Transaction::shard_serialize_util(uint32_t timestamp) {
     serialize_util(1 /* anything > 0 */, true, MAX_ARRAY_SIZE_IN_BYTES_SMALL, small_batch_num, timestamp);
 }
 
-// @safe
+// @unsafe: modifies mutable fields in const method and uses bitwise operations
 uint8_t Transaction::get_current_term() const {
     if(callback_ != nullptr){
         if(!current_term_)

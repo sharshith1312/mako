@@ -393,7 +393,7 @@ public:
     }
 
     void print_stats();
-    // @unsafe: uses pointer address-of
+    // @unsafe: modifies mutable fields in const method
     uint8_t get_current_term() const;
 
     static void clear_stats() {
@@ -686,15 +686,18 @@ public:
         return TThread::mode() == 1 || state_ < s_aborted;
     }
 
+    // @unsafe
     // opacity checking
     // These function will eventually help us track the commit TID when we
     // have no opacity, or for GV7 opacity.
     bool try_lock(TransItem& item, TVersion& vers) {
         return try_lock(item, const_cast<TransactionTid::type&>(vers.value()));
     }
+    // @unsafe
     bool try_lock(TransItem& item, TNonopaqueVersion& vers) {
         return try_lock(item, const_cast<TransactionTid::type&>(vers.value()));
     }
+    // @unsafe
     bool try_lock(TransItem& item, TransactionTid::type& vers) {
 #if STO_SORT_WRITESET
         (void) item;
@@ -817,10 +820,12 @@ public:
 
     class Abort {};
 
+    //@unsafe
     uint32_t local_random() const {
         lrng_state_ = lrng_state_ * 1664525 + 1013904223;
         return lrng_state_;
     }
+    //@unsafe
     void local_srandom(uint32_t state) {
         lrng_state_ = state;
     }
